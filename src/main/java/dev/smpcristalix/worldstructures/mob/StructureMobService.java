@@ -4,6 +4,7 @@ import dev.smpcristalix.worldstructures.config.WorldStructuresSettings;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.Particle;
 import org.bukkit.attribute.Attribute;
 import org.bukkit.attribute.AttributeInstance;
 import org.bukkit.enchantments.Enchantment;
@@ -23,7 +24,7 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.random.RandomGenerator;
 
 /**
- * Создаёт и помечает обычных, элитных и боссовых мобов структур.
+ * Создаёт, усиливает, визуально помечает обычных, элитных и боссовых мобов структур.
  */
 public final class StructureMobService {
 
@@ -172,6 +173,8 @@ public final class StructureMobService {
 
         if (boss) applyBossGear(entity);
         else applyStructureGear(entity, elite);
+
+        applyVisualIdentity(entity, structureId, elite, boss);
     }
 
     private void multiplyHealth(LivingEntity entity, double multiplier) {
@@ -287,6 +290,64 @@ public final class StructureMobService {
         equipment.setChestplateDropChance(chance);
         equipment.setLeggingsDropChance(chance);
         equipment.setBootsDropChance(chance);
+    }
+
+    private void applyVisualIdentity(LivingEntity entity, String structureId, boolean elite, boolean boss) {
+        if (boss) {
+            entity.setCustomName("§4☠ " + bossName(structureId));
+            entity.setCustomNameVisible(true);
+            entity.setGlowing(true);
+            double y = Math.max(1.0, entity.getHeight() * 0.55);
+            entity.getWorld().spawnParticle(Particle.SOUL_FIRE_FLAME,
+                    entity.getLocation().add(0.0, y, 0.0), 32, 0.45, 0.65, 0.45, 0.02);
+            entity.getWorld().spawnParticle(Particle.ENCHANT,
+                    entity.getLocation().add(0.0, y, 0.0), 36, 0.5, 0.7, 0.5, 0.08);
+            return;
+        }
+
+        if (!elite) return;
+        entity.setCustomName("§6✦ Элитный " + localizedMobName(entity.getType()));
+        entity.setCustomNameVisible(true);
+        entity.getWorld().spawnParticle(
+                Particle.ENCHANT,
+                entity.getLocation().add(0.0, Math.max(0.8, entity.getHeight() * 0.55), 0.0),
+                24,
+                0.35,
+                0.45,
+                0.35,
+                0.05
+        );
+    }
+
+    private String bossName(String structureId) {
+        if (structureId == null) return "Хозяин Руин";
+        return switch (structureId) {
+            case "campsite" -> "Капитан Черноклык";
+            case "windmill" -> "Мельничный Надзиратель";
+            case "graveyard" -> "Костяной Жнец";
+            case "lighthouse" -> "Смотритель Глубин";
+            case "ship" -> "Капитан Бездны";
+            case "castle" -> "Железный Палач";
+            case "ice_castle" -> "Ледяной Стрелок";
+            case "observatory" -> "Звёздный Пророк";
+            default -> "Хозяин Руин";
+        };
+    }
+
+    private String localizedMobName(EntityType type) {
+        return switch (type) {
+            case PILLAGER -> "налётчик";
+            case VINDICATOR -> "поборник";
+            case EVOKER -> "заклинатель";
+            case SKELETON -> "скелет";
+            case STRAY -> "зимогор";
+            case WITHER_SKELETON -> "визер-скелет";
+            case DROWNED -> "утопленник";
+            case ZOMBIE -> "зомби";
+            case HUSK -> "кадавр";
+            case BOGGED -> "болотник";
+            default -> type.name().toLowerCase().replace('_', ' ');
+        };
     }
 
     private int randomLevel(RandomGenerator random, int min, int max) {
