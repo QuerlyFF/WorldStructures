@@ -10,13 +10,30 @@ import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.projectiles.ProjectileSource;
 
+import java.util.EnumSet;
+import java.util.Set;
+
 /**
- * Награды структурных мобов и усиление дальнего урона.
+ * Награды структурных мобов, усиление дальнего урона и анти-абуз мини-боссов.
  */
 public final class StructureCombatListener implements Listener {
+
+    private static final Set<EntityDamageEvent.DamageCause> BLOCKED_BOSS_CAUSES = EnumSet.of(
+            EntityDamageEvent.DamageCause.LAVA,
+            EntityDamageEvent.DamageCause.FIRE,
+            EntityDamageEvent.DamageCause.FIRE_TICK,
+            EntityDamageEvent.DamageCause.SUFFOCATION,
+            EntityDamageEvent.DamageCause.DROWNING,
+            EntityDamageEvent.DamageCause.FALL,
+            EntityDamageEvent.DamageCause.FLY_INTO_WALL,
+            EntityDamageEvent.DamageCause.CRAMMING,
+            EntityDamageEvent.DamageCause.CONTACT,
+            EntityDamageEvent.DamageCause.FREEZE
+    );
 
     private final StructureMobService mobService;
     private final RewardService rewardService;
@@ -28,6 +45,13 @@ public final class StructureCombatListener implements Listener {
         this.mobService = mobService;
         this.rewardService = rewardService;
         this.miniBossService = miniBossService;
+    }
+
+    @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
+    public void onBossEnvironmentDamage(EntityDamageEvent event) {
+        if (!(event.getEntity() instanceof LivingEntity living)) return;
+        if (!mobService.isMiniBoss(living)) return;
+        if (BLOCKED_BOSS_CAUSES.contains(event.getCause())) event.setCancelled(true);
     }
 
     @EventHandler(priority = EventPriority.MONITOR)
@@ -44,11 +68,8 @@ public final class StructureCombatListener implements Listener {
         // Призванные боссом миньоны не дают монеты, чтобы нельзя было фармить их бесконечно.
         if (mobService.isSummonedMob(entity)) return;
 
-        if (mobService.isEliteMob(entity)) {
-            rewardService.dropEliteMobReward(event);
-        } else {
-            rewardService.dropNormalMobReward(event);
-        }
+        if (mobService.isEliteMob(entity)) rewardService.dropEliteMobReward(event);
+        else rewardService.dropNormalMobReward(event);
     }
 
     @EventHandler(priority = EventPriority.HIGH, ignoreCancelled = true)
@@ -57,9 +78,7 @@ public final class StructureCombatListener implements Listener {
         if (shooter == null || !mobService.isStructureMob(shooter)) return;
 
         double multiplier = mobService.projectileDamageMultiplier(shooter);
-        if (multiplier != 1.0) {
-            event.setDamage(event.getDamage() * multiplier);
-        }
+        if (multiplier != 1.0) event.setDamage(event.getDamage() * multiplier);
     }
 
     private LivingEntity resolveShooter(EntityDamageByEntityEvent event) {
@@ -67,9 +86,7 @@ public final class StructureCombatListener implements Listener {
             ProjectileSource source = projectile.getShooter();
             if (source instanceof LivingEntity living) return living;
         }
-        if (event.getDamager() instanceof EvokerFangs fangs) {
-            return fangs.getOwner();
-        }
+        if (event.getDamager() instanceof EvokerFangs fangs) return fangs.getOwner();
         return null;
     }
 }
