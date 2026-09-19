@@ -31,6 +31,7 @@ public final class StructureMobService {
     private final NamespacedKey eliteMobKey;
     private final NamespacedKey miniBossKey;
     private final NamespacedKey structureIdKey;
+    private final NamespacedKey structureInstanceKey;
     private final NamespacedKey projectileDamageMultiplierKey;
     private final NamespacedKey summonedByBossKey;
     private volatile WorldStructuresSettings settings;
@@ -40,6 +41,7 @@ public final class StructureMobService {
         eliteMobKey = new NamespacedKey(plugin, "elite_mob");
         miniBossKey = new NamespacedKey(plugin, "mini_boss");
         structureIdKey = new NamespacedKey(plugin, "structure_id");
+        structureInstanceKey = new NamespacedKey(plugin, "structure_instance_id");
         projectileDamageMultiplierKey = new NamespacedKey(plugin, "projectile_damage_multiplier");
         summonedByBossKey = new NamespacedKey(plugin, "summoned_by_boss");
         this.settings = settings;
@@ -50,16 +52,24 @@ public final class StructureMobService {
     }
 
     public LivingEntity spawnStructureMob(Location location, EntityType type, String structureId) {
+        return spawnStructureMob(location, type, structureId, null);
+    }
+
+    public LivingEntity spawnStructureMob(Location location, EntityType type, String structureId, String instanceId) {
         Entity spawned = location.getWorld().spawnEntity(location, type);
         if (!(spawned instanceof LivingEntity living)) {
             spawned.remove();
             throw new IllegalArgumentException("EntityType " + type + " is not a LivingEntity");
         }
-        prepareStructureMob(living, structureId);
+        prepareStructureMob(living, structureId, instanceId);
         return living;
     }
 
     public void prepareStructureMob(LivingEntity entity, String structureId) {
+        prepareStructureMob(entity, structureId, null);
+    }
+
+    public void prepareStructureMob(LivingEntity entity, String structureId, String instanceId) {
         WorldStructuresSettings.StructureBossSpec structure = settings.structure(structureId);
         double eliteChance = structure == null ? settings.eliteChance() : structure.eliteChance();
         double power = structure == null ? 1.0 : structure.powerMultiplier();
@@ -67,17 +77,17 @@ public final class StructureMobService {
         RandomGenerator random = ThreadLocalRandom.current();
         boolean elite = random.nextDouble() < eliteChance;
         WorldStructuresSettings.MobTierSpec base = elite ? settings.eliteMob() : settings.normalMob();
-        prepare(entity, structureId, scaleTier(base, power), elite, false);
+        prepare(entity, structureId, instanceId, scaleTier(base, power), elite, false);
     }
 
-    public void prepareSummonedMinion(LivingEntity entity, String structureId, UUID bossId) {
+    public void prepareSummonedMinion(LivingEntity entity, String structureId, String instanceId, UUID bossId) {
         WorldStructuresSettings.StructureBossSpec structure = settings.structure(structureId);
         double power = structure == null ? 1.0 : structure.powerMultiplier();
-        prepare(entity, structureId, scaleTier(settings.normalMob(), power), false, false);
+        prepare(entity, structureId, instanceId, scaleTier(settings.normalMob(), power), false, false);
         entity.getPersistentDataContainer().set(summonedByBossKey, PersistentDataType.STRING, bossId.toString());
     }
 
-    public void prepareMiniBoss(LivingEntity entity, String structureId) {
+    public void prepareMiniBoss(LivingEntity entity, String structureId, String instanceId) {
         WorldStructuresSettings.BossSpec boss = settings.boss();
         WorldStructuresSettings.StructureBossSpec structure = settings.structure(structureId);
         double power = structure == null ? 1.0 : structure.powerMultiplier();
@@ -87,7 +97,7 @@ public final class StructureMobService {
                 boss.damageMultiplier() * power,
                 boss.speedMultiplier()
         );
-        prepare(entity, structureId, tier, true, true);
+        prepare(entity, structureId, instanceId, tier, true, true);
         entity.setPersistent(true);
         entity.setRemoveWhenFarAway(false);
         entity.addPotionEffect(new PotionEffect(
@@ -120,6 +130,10 @@ public final class StructureMobService {
         return entity.getPersistentDataContainer().get(structureIdKey, PersistentDataType.STRING);
     }
 
+    public String structureInstanceId(LivingEntity entity) {
+        return entity.getPersistentDataContainer().get(structureInstanceKey, PersistentDataType.STRING);
+    }
+
     public double projectileDamageMultiplier(LivingEntity entity) {
         Double value = entity.getPersistentDataContainer().get(projectileDamageMultiplierKey, PersistentDataType.DOUBLE);
         return value == null ? 1.0 : value;
@@ -138,13 +152,16 @@ public final class StructureMobService {
         );
     }
 
-    private void prepare(LivingEntity entity, String structureId, WorldStructuresSettings.MobTierSpec tier,
-                         boolean elite, boolean boss) {
+    private void prepare(LivingEntity entity, String structureId, String instanceId,
+                         WorldStructuresSettings.MobTierSpec tier, boolean elite, boolean boss) {
         PersistentDataContainer pdc = entity.getPersistentDataContainer();
         if (pdc.has(structureMobKey, PersistentDataType.BYTE)) return;
 
         pdc.set(structureMobKey, PersistentDataType.BYTE, (byte) 1);
         pdc.set(structureIdKey, PersistentDataType.STRING, structureId.toLowerCase());
+        if (instanceId != null && !instanceId.isBlank()) {
+            pdc.set(structureInstanceKey, PersistentDataType.STRING, instanceId);
+        }
         pdc.set(projectileDamageMultiplierKey, PersistentDataType.DOUBLE, tier.damageMultiplier());
         if (elite) pdc.set(eliteMobKey, PersistentDataType.BYTE, (byte) 1);
         if (boss) pdc.set(miniBossKey, PersistentDataType.BYTE, (byte) 1);
@@ -153,11 +170,8 @@ public final class StructureMobService {
         multiplyAttribute(entity, Attribute.GENERIC_ATTACK_DAMAGE, tier.damageMultiplier());
         multiplyAttribute(entity, Attribute.GENERIC_MOVEMENT_SPEED, tier.speedMultiplier());
 
-        if (boss) {
-            applyBossGear(entity);
-        } else {
-            applyStructureGear(entity, elite);
-        }
+        if (boss) applyBossGear(entity);
+        else applyStructureGear(entity, elite);
     }
 
     private void multiplyHealth(LivingEntity entity, double multiplier) {
@@ -228,9 +242,7 @@ public final class StructureMobService {
     private ItemStack bossArmor(Material diamond, Material netherite, double netheriteChance, int protectionLevel) {
         Material material = ThreadLocalRandom.current().nextDouble() < netheriteChance ? netherite : diamond;
         ItemStack item = enchantedArmor(material, protectionLevel);
-        if (ThreadLocalRandom.current().nextDouble() < 0.35) {
-            item.addUnsafeEnchantment(Enchantment.THORNS, 2);
-        }
+        if (ThreadLocalRandom.current().nextDouble() < 0.35) item.addUnsafeEnchantment(Enchantment.THORNS, 2);
         return item;
     }
 
@@ -266,9 +278,7 @@ public final class StructureMobService {
                 item.addUnsafeEnchantment(Enchantment.SHARPNESS, Math.min(5, Math.max(1, power)));
                 item.addUnsafeEnchantment(Enchantment.UNBREAKING, 3);
             }
-            default -> {
-                // Оружие неизвестного типа не изменяем.
-            }
+            default -> { }
         }
     }
 
