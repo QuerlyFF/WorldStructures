@@ -8,8 +8,11 @@ commands:
   worldstructures:
     aliases: [ws]
     description: WorldStructures admin commands
-    usage: /ws <status|reload|locate|boss|reset|debug|place|mark|mob|markchest>
+    usage: /ws <status|reload|locate|boss|reset|repair|debug|place|mark|mob|markchest>
     permission: worldstructures.admin
 permissions:
   worldstructures.admin:
+    default: op
+  worldstructures.protection.bypass:
+    description: Allows administrators to edit protected structure blocks manually.
     default: op
