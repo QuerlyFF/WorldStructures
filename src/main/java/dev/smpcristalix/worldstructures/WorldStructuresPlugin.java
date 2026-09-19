@@ -4,6 +4,7 @@ import dev.smpcristalix.worldstructures.boss.MiniBossService;
 import dev.smpcristalix.worldstructures.config.WorldStructuresSettings;
 import dev.smpcristalix.worldstructures.generation.NaturalStructureGenerationListener;
 import dev.smpcristalix.worldstructures.listener.StructureCombatListener;
+import dev.smpcristalix.worldstructures.listener.StructureVisualIdentityListener;
 import dev.smpcristalix.worldstructures.loot.StructureChestService;
 import dev.smpcristalix.worldstructures.mob.StructureMobService;
 import dev.smpcristalix.worldstructures.reward.RewardService;
@@ -44,6 +45,9 @@ public final class WorldStructuresPlugin extends JavaPlugin {
 
         getServer().getPluginManager().registerEvents(
                 new StructureCombatListener(mobService, rewardService, miniBossService), this
+        );
+        getServer().getPluginManager().registerEvents(
+                new StructureVisualIdentityListener(this, mobService), this
         );
         getServer().getPluginManager().registerEvents(chestService, this);
         getServer().getPluginManager().registerEvents(generationListener, this);
