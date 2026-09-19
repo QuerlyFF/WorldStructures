@@ -17,6 +17,7 @@ import org.bukkit.plugin.Plugin;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -27,8 +28,7 @@ import java.util.Set;
 
 /**
  * Детерминированно размещает наши NBT-структуры только в новых чанках.
- * На один регион выбирается максимум одна кандидатная точка, поэтому структуры
- * не меняют позицию после рестарта и не появляются плотной кучей.
+ * На один регион выбирается максимум одна кандидатная точка.
  */
 public final class NaturalStructureGenerationListener implements Listener {
 
@@ -109,7 +109,13 @@ public final class NaturalStructureGenerationListener implements Listener {
 
     private void generate(Candidate candidate, World world) {
         if (generatedRegions.contains(candidate.regionKey()) || placing) return;
-        if (!world.isChunkLoaded(candidate.chunkX(), candidate.chunkZ())) return;
+
+        // ChunkLoadEvent был новым чанком, значит право на попытку уже получено.
+        // Если игрок успел уйти за delayTicks и чанк выгрузился, не теряем регион навсегда:
+        // кратко подгружаем тот же уже-сгенерированный кандидатный чанк и завершаем попытку.
+        if (!world.isChunkLoaded(candidate.chunkX(), candidate.chunkZ())) {
+            world.getChunkAt(candidate.chunkX(), candidate.chunkZ()).load();
+        }
 
         GenerationSpec current = generation;
         int x = candidate.chunkX() * 16 + 8;
@@ -135,7 +141,7 @@ public final class NaturalStructureGenerationListener implements Listener {
                 .filter(entry -> BiomePlacementRules.matchesHeight(
                         y, entry.getValue().minY(), entry.getValue().maxY()))
                 .filter(entry -> matchesPlacement(
-                        world, x, z, water, current, entry.getValue()))
+                        world, x, z, water, current, entry.getKey(), entry.getValue()))
                 .toList();
         if (candidates.isEmpty()) return;
 
@@ -176,13 +182,17 @@ public final class NaturalStructureGenerationListener implements Listener {
                                      int z,
                                      boolean water,
                                      GenerationSpec current,
+                                     String structureId,
                                      StructureGenerationSpec spec) {
+        int templateRadius = placementService.templateHorizontalRadius(structureId);
+        int sampleRadius = Math.max(current.terrainSampleRadius(), templateRadius + 2);
+
         return switch (spec.placement()) {
-            case WATER -> water && isOpenWaterArea(world, x, z, current.terrainSampleRadius());
+            case WATER -> water && isOpenWaterArea(world, x, z, sampleRadius);
             case LAND -> !water && isAcceptableLand(
-                    world, x, z, current.terrainSampleRadius(), current.maxHeightDifference());
+                    world, x, z, sampleRadius, current.maxHeightDifference());
             case COAST -> !water
-                    && isAcceptableLand(world, x, z, current.terrainSampleRadius(), current.maxHeightDifference())
+                    && isAcceptableLand(world, x, z, sampleRadius, current.maxHeightDifference())
                     && hasNearbyWater(world, x, z, spec.coastSearchRadius());
         };
     }
@@ -199,7 +209,7 @@ public final class NaturalStructureGenerationListener implements Listener {
     private boolean isOpenWaterArea(World world, int centerX, int centerZ, int radius) {
         int checks = 0;
         int waterChecks = 0;
-        int step = Math.max(4, radius);
+        int step = Math.max(4, radius / 2);
         for (int dx = -radius; dx <= radius; dx += step) {
             for (int dz = -radius; dz <= radius; dz += step) {
                 checks++;
@@ -232,7 +242,7 @@ public final class NaturalStructureGenerationListener implements Listener {
     private boolean isAcceptableLand(World world, int centerX, int centerZ, int radius, int maxDifference) {
         int minY = Integer.MAX_VALUE;
         int maxY = Integer.MIN_VALUE;
-        int step = Math.max(4, radius);
+        int step = Math.max(4, radius / 2);
 
         for (int dx = -radius; dx <= radius; dx += step) {
             for (int dz = -radius; dz <= radius; dz += step) {
@@ -302,7 +312,9 @@ public final class NaturalStructureGenerationListener implements Listener {
                     coastSearchRadius
             ));
         }
-        structures = Map.copyOf(parsed);
+        // Map.copyOf не обещает порядок итерации. Для детерминированного weighted choice
+        // сохраняем порядок config.yml через LinkedHashMap.
+        structures = Collections.unmodifiableMap(new LinkedHashMap<>(parsed));
     }
 
     private PlacementKind parsePlacement(String raw) {
