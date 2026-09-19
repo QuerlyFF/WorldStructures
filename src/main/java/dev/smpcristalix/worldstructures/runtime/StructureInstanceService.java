@@ -19,14 +19,17 @@ import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 
 /**
  * Хранит конкретные экземпляры сгенерированных структур и обслуживает их зоны.
- * Через этот сервис работают предупреждения игрокам, поиск структур и респавн охраны.
+ * Для частых проверок блоков используется индекс по чанкам, чтобы защита структуры
+ * не перебирала все существующие данжи на каждое событие мира.
  */
 public final class StructureInstanceService {
 
@@ -34,6 +37,7 @@ public final class StructureInstanceService {
     private final StructureMobService mobService;
     private final File storageFile;
     private final Map<String, StructureInstance> instances = new LinkedHashMap<>();
+    private final Map<ChunkKey, Set<String>> chunkIndex = new HashMap<>();
     private final Map<UUID, String> playerZones = new HashMap<>();
     private volatile WorldStructuresSettings settings;
     private StructurePlacementService placementService;
@@ -54,22 +58,38 @@ public final class StructureInstanceService {
 
     public void start() {
         load();
+        scheduleTask();
+    }
+
+    public void stop() {
+        if (task != null) {
+            task.cancel();
+            task = null;
+        }
+        save();
+        playerZones.clear();
+        chunkIndex.clear();
+    }
+
+    /** Перечитывает runtime-настройки и реально применяет новый scan interval без рестарта. */
+    public void reload(WorldStructuresSettings newSettings) {
+        this.settings = newSettings;
+        scheduleTask();
+    }
+
+    private void scheduleTask() {
+        if (task != null) task.cancel();
         long interval = Math.max(20L, plugin.getConfig().getLong("runtime.scan-interval-seconds", 5L) * 20L);
         task = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, interval, interval);
     }
 
-    public void stop() {
-        if (task != null) task.cancel();
-        save();
-        playerZones.clear();
-    }
-
-    public void reload(WorldStructuresSettings newSettings) {
-        this.settings = newSettings;
-    }
-
     public void registerInstance(String instanceId, String structureId, BoundsData bounds) {
-        instances.put(instanceId, new StructureInstance(instanceId, structureId.toLowerCase(), bounds, 0L));
+        StructureInstance previous = instances.put(
+                instanceId,
+                new StructureInstance(instanceId, structureId.toLowerCase(), bounds, 0L)
+        );
+        if (previous != null) rebuildSpatialIndex();
+        else indexInstance(instances.get(instanceId));
         save();
     }
 
@@ -82,6 +102,20 @@ public final class StructureInstanceService {
         return instance == null ? null : instance.view();
     }
 
+    /**
+     * Частая проверка для protection/listeners. Возвращает instance, реально содержащий точку,
+     * а не просто ближайший по центру.
+     */
+    public InstanceView containing(Location location, int padding) {
+        StructureInstance instance = findContaining(location, Math.max(0, padding));
+        return instance == null ? null : instance.view();
+    }
+
+    public boolean isInside(Location location) {
+        return findContaining(location, 0) != null;
+    }
+
+    /** Админский поиск; вызывается редко, поэтому здесь полный перебор допустим. */
     public InstanceView nearest(Location location, String structureId) {
         if (location == null || location.getWorld() == null) return null;
         String filter = structureId == null ? null : structureId.toLowerCase();
@@ -137,7 +171,11 @@ public final class StructureInstanceService {
 
         for (StructureInstance instance : instances.values()) {
             World world = Bukkit.getWorld(instance.bounds.worldName());
-            if (world == null || !isCenterChunkLoaded(world, instance.bounds)) continue;
+            if (world == null) continue;
+
+            // Нельзя считать охрану мёртвой, если часть чанков самого данжа выгружена:
+            // сущности в этих чанках просто отсутствуют в world.getNearbyEntities().
+            if (!areBoundsChunksLoaded(world, instance.bounds, 8)) continue;
 
             int guards = countAliveGuards(instance, world);
             if (guards > 0) {
@@ -156,7 +194,7 @@ public final class StructureInstanceService {
 
             if (now - instance.guardsClearedAtMillis < respawnMillis) continue;
             Location center = instance.bounds.center();
-            if (hasNearbyPlayer(world, center, exclusionRadius)) continue;
+            if (center.getWorld() == null || hasNearbyPlayer(world, center, exclusionRadius)) continue;
 
             placementService.respawnGuards(instance.view());
             instance.guardsClearedAtMillis = 0L;
@@ -183,24 +221,47 @@ public final class StructureInstanceService {
 
     private StructureInstance findContaining(Location location, int padding) {
         if (location == null || location.getWorld() == null) return null;
-        for (StructureInstance instance : instances.values()) {
-            BoundsData b = instance.bounds;
-            if (!b.worldName().equals(location.getWorld().getName())) continue;
-            double x = location.getX();
-            double y = location.getY();
-            double z = location.getZ();
-            if (x >= b.minX() - padding && x <= b.maxX() + padding
-                    && y >= b.minY() - padding && y <= b.maxY() + padding
-                    && z >= b.minZ() - padding && z <= b.maxZ() + padding) {
-                return instance;
+
+        int chunkX = location.getBlockX() >> 4;
+        int chunkZ = location.getBlockZ() >> 4;
+        int chunkRadius = Math.max(0, (padding + 15) / 16);
+        Set<String> candidateIds = new HashSet<>();
+
+        for (int dx = -chunkRadius; dx <= chunkRadius; dx++) {
+            for (int dz = -chunkRadius; dz <= chunkRadius; dz++) {
+                Set<String> ids = chunkIndex.get(new ChunkKey(location.getWorld().getName(), chunkX + dx, chunkZ + dz));
+                if (ids != null) candidateIds.addAll(ids);
             }
+        }
+
+        for (String id : candidateIds) {
+            StructureInstance instance = instances.get(id);
+            if (instance != null && contains(instance.bounds, location, padding)) return instance;
         }
         return null;
     }
 
-    private boolean isCenterChunkLoaded(World world, BoundsData bounds) {
-        Location center = bounds.center();
-        return world.isChunkLoaded(center.getBlockX() >> 4, center.getBlockZ() >> 4);
+    private boolean contains(BoundsData b, Location location, int padding) {
+        if (location.getWorld() == null || !b.worldName().equals(location.getWorld().getName())) return false;
+        double x = location.getX();
+        double y = location.getY();
+        double z = location.getZ();
+        return x >= b.minX() - padding && x <= b.maxX() + padding
+                && y >= b.minY() - padding && y <= b.maxY() + padding
+                && z >= b.minZ() - padding && z <= b.maxZ() + padding;
+    }
+
+    private boolean areBoundsChunksLoaded(World world, BoundsData bounds, int padding) {
+        int minChunkX = (bounds.minX() - padding) >> 4;
+        int maxChunkX = (bounds.maxX() + padding) >> 4;
+        int minChunkZ = (bounds.minZ() - padding) >> 4;
+        int maxChunkZ = (bounds.maxZ() + padding) >> 4;
+        for (int cx = minChunkX; cx <= maxChunkX; cx++) {
+            for (int cz = minChunkZ; cz <= maxChunkZ; cz++) {
+                if (!world.isChunkLoaded(cx, cz)) return false;
+            }
+        }
+        return true;
     }
 
     private boolean hasNearbyPlayer(World world, Location center, double radius) {
@@ -219,6 +280,7 @@ public final class StructureInstanceService {
 
     private void load() {
         instances.clear();
+        chunkIndex.clear();
         if (!storageFile.exists()) return;
         YamlConfiguration yaml = YamlConfiguration.loadConfiguration(storageFile);
         ConfigurationSection root = yaml.getConfigurationSection("instances");
@@ -239,6 +301,26 @@ public final class StructureInstanceService {
                     id, structure, bounds, yaml.getLong(path + ".guards-cleared-at-ms", 0L)
             ));
         }
+        rebuildSpatialIndex();
+    }
+
+    private void indexInstance(StructureInstance instance) {
+        BoundsData b = instance.bounds;
+        int minChunkX = b.minX() >> 4;
+        int maxChunkX = b.maxX() >> 4;
+        int minChunkZ = b.minZ() >> 4;
+        int maxChunkZ = b.maxZ() >> 4;
+        for (int cx = minChunkX; cx <= maxChunkX; cx++) {
+            for (int cz = minChunkZ; cz <= maxChunkZ; cz++) {
+                chunkIndex.computeIfAbsent(new ChunkKey(b.worldName(), cx, cz), ignored -> new HashSet<>())
+                        .add(instance.instanceId);
+            }
+        }
+    }
+
+    private void rebuildSpatialIndex() {
+        chunkIndex.clear();
+        for (StructureInstance instance : instances.values()) indexInstance(instance);
     }
 
     private void save() {
@@ -293,12 +375,16 @@ public final class StructureInstanceService {
     public record BoundsData(String worldName, int minX, int maxX, int minY, int maxY, int minZ, int maxZ) {
         public Location center() {
             World world = Bukkit.getWorld(worldName);
-            if (world == null) return new Location(null, (minX + maxX) / 2.0, (minY + maxY) / 2.0, (minZ + maxZ) / 2.0);
+            if (world == null) {
+                return new Location(null, (minX + maxX) / 2.0, (minY + maxY) / 2.0, (minZ + maxZ) / 2.0);
+            }
             return new Location(world, (minX + maxX) / 2.0 + 0.5, (minY + maxY) / 2.0, (minZ + maxZ) / 2.0 + 0.5);
         }
     }
 
     public record InstanceView(String instanceId, String structureId, BoundsData bounds, long guardsClearedAtMillis) {}
+
+    private record ChunkKey(String worldName, int chunkX, int chunkZ) {}
 
     private static final class StructureInstance {
         private final String instanceId;
