@@ -1,6 +1,21 @@
 general:
   enabled: true
 
+runtime:
+  # Как часто проверяем зоны игроков и состояние охраны.
+  scan-interval-seconds: 5
+  # Небольшой запас вокруг фактических границ NBT для сообщения о входе.
+  zone-padding-blocks: 8
+
+  # Охрана восстанавливается только после полной зачистки и только без игроков рядом.
+  guard-respawn-seconds: 7200
+  guard-respawn-player-exclusion-radius: 64
+
+  # Мини-босс не может быть уведён слишком далеко от своей структуры.
+  boss-leash-radius: 64
+  boss-return-heal-fraction: 0.25
+  bossbar-radius: 48
+
 generation:
   # Генерируем только в новых чанках обычного мира.
   enabled: true
