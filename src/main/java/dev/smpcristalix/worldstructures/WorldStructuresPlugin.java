@@ -8,7 +8,9 @@ import dev.smpcristalix.worldstructures.listener.StructureVisualIdentityListener
 import dev.smpcristalix.worldstructures.loot.StructureChestService;
 import dev.smpcristalix.worldstructures.mob.StructureMobService;
 import dev.smpcristalix.worldstructures.reward.RewardService;
+import dev.smpcristalix.worldstructures.runtime.StructureInstanceService;
 import dev.smpcristalix.worldstructures.structure.StructurePlacementService;
+import org.bukkit.Location;
 import org.bukkit.block.Block;
 import org.bukkit.block.Container;
 import org.bukkit.command.CommandSender;
@@ -27,6 +29,7 @@ public final class WorldStructuresPlugin extends JavaPlugin {
     private RewardService rewardService;
     private MiniBossService miniBossService;
     private StructureChestService chestService;
+    private StructureInstanceService instanceService;
     private StructurePlacementService placementService;
     private NaturalStructureGenerationListener generationListener;
 
@@ -39,7 +42,11 @@ public final class WorldStructuresPlugin extends JavaPlugin {
         rewardService = new RewardService(this, settings);
         miniBossService = new MiniBossService(this, settings, mobService);
         chestService = new StructureChestService(this, settings, rewardService);
-        placementService = new StructurePlacementService(this, settings, mobService, miniBossService, chestService);
+        instanceService = new StructureInstanceService(this, settings, mobService);
+        placementService = new StructurePlacementService(
+                this, settings, mobService, miniBossService, chestService, instanceService
+        );
+        instanceService.attachPlacementService(placementService);
         placementService.loadTemplates();
         generationListener = new NaturalStructureGenerationListener(this, settings, placementService);
 
@@ -51,6 +58,8 @@ public final class WorldStructuresPlugin extends JavaPlugin {
         );
         getServer().getPluginManager().registerEvents(chestService, this);
         getServer().getPluginManager().registerEvents(generationListener, this);
+
+        instanceService.start();
         miniBossService.start();
         registerCommand();
 
@@ -60,6 +69,7 @@ public final class WorldStructuresPlugin extends JavaPlugin {
     @Override
     public void onDisable() {
         if (generationListener != null) generationListener.stop();
+        if (instanceService != null) instanceService.stop();
         if (miniBossService != null) miniBossService.stop();
     }
 
@@ -78,10 +88,11 @@ public final class WorldStructuresPlugin extends JavaPlugin {
             sender.sendMessage("§7Конфигов структур: §f" + settings.structures().size());
             sender.sendMessage("§7Загружено NBT: §f" + placementService.loadedTemplateCount());
             sender.sendMessage("§7Сгенерировано регионов: §f" + generationListener.generatedRegionCount());
+            sender.sendMessage("§7Экземпляров структур: §f" + instanceService.instanceCount());
             sender.sendMessage("§7Якорей мини-боссов: §f" + miniBossService.anchorCount());
             sender.sendMessage("§7Живых мини-боссов: §f" + miniBossService.aliveBossCount());
             sender.sendMessage("§7Респавн босса: §f" + (settings.boss().respawnTicks() / 20 / 60) + " мин");
-            sender.sendMessage("§7Осколок с босса: §f" + percent(settings.boss().shardDropChance()));
+            sender.sendMessage("§7Респавн охраны: §f" + getConfig().getLong("runtime.guard-respawn-seconds", 7200L) / 60 + " мин");
             return true;
         }
 
@@ -92,6 +103,7 @@ public final class WorldStructuresPlugin extends JavaPlugin {
             rewardService.reload(settings);
             miniBossService.reload(settings);
             chestService.reload(settings);
+            instanceService.reload(settings);
             placementService.reload(settings);
             generationListener.reload(settings);
             sender.sendMessage("§aWorldStructures перезагружен.");
@@ -103,20 +115,86 @@ public final class WorldStructuresPlugin extends JavaPlugin {
             return true;
         }
 
+        if (args[0].equalsIgnoreCase("locate")) {
+            if (args.length < 2) {
+                player.sendMessage("§cИспользование: /ws locate <structureId>");
+                return true;
+            }
+            StructureInstanceService.InstanceView instance = instanceService.nearest(player.getLocation(), args[1]);
+            if (instance == null) {
+                player.sendMessage("§cСгенерированных структур такого типа пока не найдено.");
+                return true;
+            }
+            Location center = instance.bounds().center();
+            long distance = Math.round(Math.sqrt(horizontalDistanceSquared(player.getLocation(), center)));
+            player.sendMessage("§6Ближайшая §f" + instance.structureId() + " §7— §f"
+                    + center.getBlockX() + " " + center.getBlockY() + " " + center.getBlockZ()
+                    + " §7(~" + distance + " блоков)");
+            player.sendMessage("§7Instance: §f" + instance.instanceId());
+            return true;
+        }
+
+        if (args[0].equalsIgnoreCase("boss")) {
+            if (args.length < 2 || !(args[1].equalsIgnoreCase("respawn") || args[1].equalsIgnoreCase("kill"))) {
+                player.sendMessage("§cИспользование: /ws boss <respawn|kill> [structureId]");
+                return true;
+            }
+            String structureId = args.length >= 3 ? args[2] : null;
+            MiniBossService.BossAnchorInfo boss = miniBossService.nearest(player.getLocation(), structureId);
+            if (boss == null) {
+                player.sendMessage("§cПодходящий boss-anchor не найден.");
+                return true;
+            }
+            boolean ok = args[1].equalsIgnoreCase("respawn")
+                    ? miniBossService.forceRespawn(boss.id())
+                    : miniBossService.forceRemove(boss.id());
+            player.sendMessage(ok ? "§aКоманда применена к §f" + boss.id() : "§cНе удалось изменить босса.");
+            return true;
+        }
+
+        if (args[0].equalsIgnoreCase("reset")) {
+            if (args.length < 2) {
+                player.sendMessage("§cИспользование: /ws reset <structureId>");
+                return true;
+            }
+            StructureInstanceService.InstanceView instance = instanceService.nearest(player.getLocation(), args[1]);
+            if (instance == null) {
+                player.sendMessage("§cЭкземпляр структуры не найден.");
+                return true;
+            }
+            instanceService.resetGuards(instance.instanceId());
+            miniBossService.forceRespawn(instance.instanceId());
+            player.sendMessage("§aСтруктура сброшена: охрана и мини-босс восстановлены. Сундуки не перезаполнялись.");
+            return true;
+        }
+
+        if (args[0].equalsIgnoreCase("debug")) {
+            StructureInstanceService.InstanceView nearest = instanceService.nearest(player.getLocation(), null);
+            player.sendMessage("§6WorldStructures debug");
+            player.sendMessage("§7Instances: §f" + instanceService.instanceCount()
+                    + " §7| Bosses: §f" + miniBossService.aliveBossCount() + "/" + miniBossService.anchorCount());
+            player.sendMessage("§7Leash: §f" + getConfig().getDouble("runtime.boss-leash-radius", 64.0)
+                    + " §7| BossBar: §f" + getConfig().getDouble("runtime.bossbar-radius", 48.0));
+            player.sendMessage("§7Guard respawn: §f" + getConfig().getLong("runtime.guard-respawn-seconds", 7200L) + " сек");
+            if (nearest != null) {
+                Location center = nearest.bounds().center();
+                player.sendMessage("§7Nearest: §f" + nearest.instanceId() + " §7(" + nearest.structureId() + ") §f"
+                        + center.getBlockX() + " " + center.getBlockY() + " " + center.getBlockZ());
+            }
+            return true;
+        }
+
         if (args[0].equalsIgnoreCase("place")) {
             if (args.length < 2) {
                 player.sendMessage("§cИспользование: /ws place <structureId>");
                 return true;
             }
-            String structureId = args[1].toLowerCase();
             try {
-                StructurePlacementService.PlacementResult result = placementService.place(structureId, player.getLocation());
+                StructurePlacementService.PlacementResult result = placementService.place(args[1].toLowerCase(), player.getLocation());
                 player.sendMessage("§aСтруктура §f" + result.structureId() + " §aпоставлена.");
-                player.sendMessage("§7Поворот: §f" + result.rotation()
+                player.sendMessage("§7Instance: §f" + result.instanceId()
                         + " §7| Размер: §f" + result.sizeX() + "x" + result.sizeY() + "x" + result.sizeZ());
-                player.sendMessage("§7Охрана: §f" + result.mobsSpawned()
-                        + " §7| Контейнеры: §f" + result.containersMarked());
-                player.sendMessage("§7Boss anchor: §f" + result.bossAnchorId());
+                player.sendMessage("§7Охрана: §f" + result.mobsSpawned() + " §7| Контейнеры: §f" + result.containersMarked());
             } catch (IllegalArgumentException | IllegalStateException exception) {
                 player.sendMessage("§c" + exception.getMessage());
             }
@@ -164,16 +242,19 @@ public final class WorldStructuresPlugin extends JavaPlugin {
                 player.sendMessage("§cПосмотри на сундук/бочку не дальше 6 блоков.");
                 return true;
             }
-            chestService.markContainer(container);
-            player.sendMessage("§aКонтейнер помечен как сундук структуры.");
+            String structureId = args.length >= 2 ? args[1].toLowerCase() : "unknown";
+            chestService.markContainer(container, structureId);
+            player.sendMessage("§aКонтейнер помечен как сундук структуры §f" + structureId + "§a.");
             return true;
         }
 
-        player.sendMessage("§cИспользование: /ws <status|reload|place|mark|mob|markchest>");
+        player.sendMessage("§cИспользование: /ws <status|reload|locate|boss|reset|debug|place|mark|mob|markchest>");
         return true;
     }
 
-    private String percent(double chance) {
-        return String.format("%.1f%%", chance * 100.0);
+    private double horizontalDistanceSquared(Location a, Location b) {
+        double dx = a.getX() - b.getX();
+        double dz = a.getZ() - b.getZ();
+        return dx * dx + dz * dz;
     }
 }
