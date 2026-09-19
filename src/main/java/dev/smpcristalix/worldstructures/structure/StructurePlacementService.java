@@ -4,12 +4,15 @@ import dev.smpcristalix.worldstructures.boss.MiniBossService;
 import dev.smpcristalix.worldstructures.config.WorldStructuresSettings;
 import dev.smpcristalix.worldstructures.loot.StructureChestService;
 import dev.smpcristalix.worldstructures.mob.StructureMobService;
+import dev.smpcristalix.worldstructures.runtime.StructureInstanceService;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.Container;
 import org.bukkit.block.structure.Mirror;
 import org.bukkit.block.structure.StructureRotation;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.LivingEntity;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.structure.Structure;
 import org.bukkit.util.BlockVector;
@@ -19,11 +22,12 @@ import java.io.InputStream;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
+import java.util.UUID;
 import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Загружает NBT-шаблоны из JAR и ставит полностью игровую структуру:
- * постройка -> сундуки -> охрана -> якорь мини-босса.
+ * постройка -> сундуки -> охрана -> runtime instance -> якорь мини-босса.
  */
 public final class StructurePlacementService {
 
@@ -33,6 +37,7 @@ public final class StructurePlacementService {
     private final StructureMobService mobService;
     private final MiniBossService bossService;
     private final StructureChestService chestService;
+    private final StructureInstanceService instanceService;
     private final Map<String, Structure> templates = new HashMap<>();
     private volatile WorldStructuresSettings settings;
 
@@ -40,12 +45,14 @@ public final class StructurePlacementService {
                                      WorldStructuresSettings settings,
                                      StructureMobService mobService,
                                      MiniBossService bossService,
-                                     StructureChestService chestService) {
+                                     StructureChestService chestService,
+                                     StructureInstanceService instanceService) {
         this.plugin = plugin;
         this.settings = settings;
         this.mobService = mobService;
         this.bossService = bossService;
         this.chestService = chestService;
+        this.instanceService = instanceService;
     }
 
     public void loadTemplates() {
@@ -89,16 +96,47 @@ public final class StructurePlacementService {
         blockOrigin.setY(Math.floor(blockOrigin.getY()));
         blockOrigin.setZ(Math.floor(blockOrigin.getZ()));
 
-        // Сущности из скачанного NBT не переносим: состав мобов полностью контролирует наш конфиг.
         structure.place(blockOrigin, false, rotation, Mirror.NONE, -1, 1.0f, random);
 
         Bounds bounds = boundsFor(blockOrigin, structure.getSize(), rotation);
+        String instanceId = id + "-" + UUID.randomUUID().toString().substring(0, 8);
+        instanceService.registerInstance(instanceId, id, bounds.toData());
+
         int containers = markContainers(id, bounds);
-        int mobs = spawnConfiguredMobs(id, spec, bounds, random);
+        int mobs = spawnConfiguredMobs(instanceId, id, spec, bounds, random);
 
         Location bossLocation = findSafeSpawn(bounds.center(), bounds, random);
-        String anchorId = bossService.registerAnchor(id, bossLocation);
-        return new PlacementResult(id, rotation, bounds.sizeX(), bounds.sizeY(), bounds.sizeZ(), containers, mobs, anchorId);
+        String anchorId = bossService.registerAnchor(instanceId, id, bossLocation);
+        return new PlacementResult(id, instanceId, rotation, bounds.sizeX(), bounds.sizeY(), bounds.sizeZ(), containers, mobs, anchorId);
+    }
+
+    public int respawnGuards(StructureInstanceService.InstanceView instance) {
+        if (instance == null) return 0;
+        WorldStructuresSettings.StructureBossSpec spec = settings.structure(instance.structureId());
+        if (spec == null) return 0;
+        Bounds bounds = Bounds.from(instance.bounds());
+        World world = bounds.world;
+        if (world == null) return 0;
+        world.getChunkAt(bounds.center()).load();
+        return spawnConfiguredMobs(instance.instanceId(), instance.structureId(), spec, bounds, ThreadLocalRandom.current());
+    }
+
+    public int resetGuards(StructureInstanceService.InstanceView instance) {
+        if (instance == null) return 0;
+        Bounds bounds = Bounds.from(instance.bounds());
+        World world = bounds.world;
+        if (world == null) return 0;
+
+        Location center = bounds.center();
+        double rx = Math.max(8.0, bounds.sizeX() / 2.0 + 8.0);
+        double ry = Math.max(8.0, bounds.sizeY() / 2.0 + 8.0);
+        double rz = Math.max(8.0, bounds.sizeZ() / 2.0 + 8.0);
+        for (Entity entity : world.getNearbyEntities(center, rx, ry, rz)) {
+            if (!(entity instanceof LivingEntity living)) continue;
+            if (!mobService.isStructureMob(living) || mobService.isMiniBoss(living)) continue;
+            if (instance.instanceId().equals(mobService.structureInstanceId(living))) living.remove();
+        }
+        return respawnGuards(instance);
     }
 
     private int markContainers(String structureId, Bounds bounds) {
@@ -117,7 +155,8 @@ public final class StructurePlacementService {
         return count;
     }
 
-    private int spawnConfiguredMobs(String structureId,
+    private int spawnConfiguredMobs(String instanceId,
+                                    String structureId,
                                     WorldStructuresSettings.StructureBossSpec spec,
                                     Bounds bounds,
                                     Random random) {
@@ -129,7 +168,7 @@ public final class StructurePlacementService {
             for (int i = 0; i < count; i++) {
                 Location location = findSafeSpawn(bounds.center(), bounds, random);
                 try {
-                    mobService.spawnStructureMob(location, mob.type(), structureId);
+                    mobService.spawnStructureMob(location, mob.type(), structureId, instanceId);
                     spawned++;
                 } catch (IllegalArgumentException exception) {
                     plugin.getLogger().warning("Не удалось создать " + mob.type() + " для " + structureId);
@@ -156,7 +195,6 @@ public final class StructurePlacementService {
             }
         }
 
-        // Если внутри шаблона не нашли идеальную точку — ищем поверхность около центра.
         int x = fallback.getBlockX();
         int z = fallback.getBlockZ();
         int y = world.getHighestBlockYAt(x, z) + 1;
@@ -207,6 +245,7 @@ public final class StructurePlacementService {
     }
 
     public record PlacementResult(String structureId,
+                                  String instanceId,
                                   StructureRotation rotation,
                                   int sizeX,
                                   int sizeY,
@@ -232,6 +271,18 @@ public final class StructurePlacementService {
             this.maxY = Math.max(minY, maxY);
             this.minZ = Math.min(minZ, maxZ);
             this.maxZ = Math.max(minZ, maxZ);
+        }
+
+        private static Bounds from(StructureInstanceService.BoundsData data) {
+            World world = data == null ? null : org.bukkit.Bukkit.getWorld(data.worldName());
+            if (data == null) return new Bounds(world, 0, 0, 0, 0, 0, 0);
+            return new Bounds(world, data.minX(), data.maxX(), data.minY(), data.maxY(), data.minZ(), data.maxZ());
+        }
+
+        private StructureInstanceService.BoundsData toData() {
+            return new StructureInstanceService.BoundsData(
+                    world.getName(), minX, maxX, minY, maxY, minZ, maxZ
+            );
         }
 
         private Location center() {
