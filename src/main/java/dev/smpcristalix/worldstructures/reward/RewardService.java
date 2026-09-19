@@ -3,29 +3,33 @@ package dev.smpcristalix.worldstructures.reward;
 import dev.smpcristalix.worldstructures.config.WorldStructuresSettings;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
-import org.bukkit.entity.LivingEntity;
 import org.bukkit.event.entity.EntityDeathEvent;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.Plugin;
 
+import java.util.Objects;
 import java.util.concurrent.ThreadLocalRandom;
 import java.util.random.RandomGenerator;
 
 /**
  * Централизованно выдаёт физические награды структур.
- * Позже этот класс можно заменить мостом к отдельному Economy/Stats plugin без изменения логики мобов.
+ * Используем общие SMP-id, чтобы будущий Economy/Stats plugin узнавал те же предметы,
+ * а не создавал отдельные несовместимые копии монет/осколков.
  */
 public final class RewardService {
+
+    public static final String BRONZE_COIN_ID = "smpcristalix:bronze_coin";
+    public static final String STAT_SHARD_ID = "smpcristalix:stat_shard";
 
     private final NamespacedKey bronzeCoinKey;
     private final NamespacedKey statShardKey;
     private volatile WorldStructuresSettings settings;
 
     public RewardService(Plugin plugin, WorldStructuresSettings settings) {
-        this.bronzeCoinKey = new NamespacedKey(plugin, "bronze_coin");
-        this.statShardKey = new NamespacedKey(plugin, "stat_shard");
+        this.bronzeCoinKey = Objects.requireNonNull(NamespacedKey.fromString(BRONZE_COIN_ID));
+        this.statShardKey = Objects.requireNonNull(NamespacedKey.fromString(STAT_SHARD_ID));
         this.settings = settings;
     }
 

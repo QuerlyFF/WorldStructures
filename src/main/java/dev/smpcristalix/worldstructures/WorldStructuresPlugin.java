@@ -2,6 +2,7 @@ package dev.smpcristalix.worldstructures;
 
 import dev.smpcristalix.worldstructures.boss.MiniBossService;
 import dev.smpcristalix.worldstructures.config.WorldStructuresSettings;
+import dev.smpcristalix.worldstructures.generation.NaturalStructureGenerationListener;
 import dev.smpcristalix.worldstructures.listener.StructureCombatListener;
 import dev.smpcristalix.worldstructures.loot.StructureChestService;
 import dev.smpcristalix.worldstructures.mob.StructureMobService;
@@ -26,6 +27,7 @@ public final class WorldStructuresPlugin extends JavaPlugin {
     private MiniBossService miniBossService;
     private StructureChestService chestService;
     private StructurePlacementService placementService;
+    private NaturalStructureGenerationListener generationListener;
 
     @Override
     public void onEnable() {
@@ -38,11 +40,13 @@ public final class WorldStructuresPlugin extends JavaPlugin {
         chestService = new StructureChestService(this, settings, rewardService);
         placementService = new StructurePlacementService(this, settings, mobService, miniBossService, chestService);
         placementService.loadTemplates();
+        generationListener = new NaturalStructureGenerationListener(this, settings, placementService);
 
         getServer().getPluginManager().registerEvents(
                 new StructureCombatListener(mobService, rewardService, miniBossService), this
         );
         getServer().getPluginManager().registerEvents(chestService, this);
+        getServer().getPluginManager().registerEvents(generationListener, this);
         miniBossService.start();
         registerCommand();
 
@@ -51,6 +55,7 @@ public final class WorldStructuresPlugin extends JavaPlugin {
 
     @Override
     public void onDisable() {
+        if (generationListener != null) generationListener.stop();
         if (miniBossService != null) miniBossService.stop();
     }
 
@@ -68,6 +73,7 @@ public final class WorldStructuresPlugin extends JavaPlugin {
             sender.sendMessage("§6WorldStructures §7— §f" + (settings.enabled() ? "включён" : "выключен"));
             sender.sendMessage("§7Конфигов структур: §f" + settings.structures().size());
             sender.sendMessage("§7Загружено NBT: §f" + placementService.loadedTemplateCount());
+            sender.sendMessage("§7Сгенерировано регионов: §f" + generationListener.generatedRegionCount());
             sender.sendMessage("§7Якорей мини-боссов: §f" + miniBossService.anchorCount());
             sender.sendMessage("§7Живых мини-боссов: §f" + miniBossService.aliveBossCount());
             sender.sendMessage("§7Респавн босса: §f" + (settings.boss().respawnTicks() / 20 / 60) + " мин");
@@ -83,6 +89,7 @@ public final class WorldStructuresPlugin extends JavaPlugin {
             miniBossService.reload(settings);
             chestService.reload(settings);
             placementService.reload(settings);
+            generationListener.reload(settings);
             sender.sendMessage("§aWorldStructures перезагружен.");
             return true;
         }
