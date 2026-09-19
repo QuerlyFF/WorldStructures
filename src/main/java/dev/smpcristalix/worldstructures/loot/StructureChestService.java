@@ -71,6 +71,45 @@ public final class StructureChestService implements Listener {
         container.update(true, false);
     }
 
+    /** Снимок сундука нужен /ws repair, чтобы перепостройка NBT не создавала новый лут. */
+    public RepairSnapshot snapshotForRepair(Container container) {
+        ItemStack[] original = container.getInventory().getContents();
+        ItemStack[] copy = new ItemStack[original.length];
+        for (int i = 0; i < original.length; i++) {
+            copy[i] = original[i] == null ? null : original[i].clone();
+        }
+        boolean generated = container.getPersistentDataContainer().has(rewardGeneratedKey, PersistentDataType.BYTE);
+        return new RepairSnapshot(copy, generated);
+    }
+
+    /**
+     * Возвращает точное содержимое и состояние сундука после repair.
+     * Если старого снимка нет, контейнер запечатывается как уже сгенерированный:
+     * ремонт никогда не должен создавать дополнительную попытку ценного лута.
+     */
+    public void restoreAfterRepair(Container container, String structureId, RepairSnapshot snapshot) {
+        markContainer(container, structureId);
+        if (snapshot == null) {
+            container.getPersistentDataContainer().set(rewardGeneratedKey, PersistentDataType.BYTE, (byte) 1);
+            container.update(true, false);
+            return;
+        }
+
+        container.getInventory().clear();
+        ItemStack[] restored = new ItemStack[snapshot.contents().length];
+        for (int i = 0; i < snapshot.contents().length; i++) {
+            ItemStack item = snapshot.contents()[i];
+            restored[i] = item == null ? null : item.clone();
+        }
+        container.getInventory().setContents(restored);
+        if (snapshot.rewardGenerated()) {
+            container.getPersistentDataContainer().set(rewardGeneratedKey, PersistentDataType.BYTE, (byte) 1);
+        } else {
+            container.getPersistentDataContainer().remove(rewardGeneratedKey);
+        }
+        container.update(true, false);
+    }
+
     @EventHandler(priority = EventPriority.NORMAL, ignoreCancelled = true)
     public void onOpen(InventoryOpenEvent event) {
         InventoryHolder holder = event.getInventory().getHolder();
@@ -89,7 +128,6 @@ public final class StructureChestService implements Listener {
         WorldStructuresSettings.ChestSpec chest = settings.chest();
         Player player = event.getPlayer() instanceof Player p ? p : null;
 
-        // Чем опаснее и реже структура, тем немного выше шанс хорошего содержимого.
         double dangerChanceMultiplier = 1.0 + Math.max(0, dangerLevel - 1) * 0.15;
 
         if (random.nextDouble() < capped(chest.coinChance() * dangerChanceMultiplier)) {
@@ -123,9 +161,7 @@ public final class StructureChestService implements Listener {
         if (total <= 0) return null;
 
         int roll = random.nextInt(total);
-        if (roll < chest.enchantedBookWeight()) {
-            return enchantedBook(random);
-        }
+        if (roll < chest.enchantedBookWeight()) return enchantedBook(random);
         roll -= chest.enchantedBookWeight();
         if (roll < chest.experienceBottleWeight()) {
             int max = dangerLevel >= 3 ? 6 : 4;
@@ -134,9 +170,6 @@ public final class StructureChestService implements Listener {
         return preciousResource(dangerLevel, random);
     }
 
-    /**
-     * Все книги из структур ограничены I-II уровнем, чтобы сундуки не заменяли стол зачарований.
-     */
     private ItemStack enchantedBook(RandomGenerator random) {
         ItemStack book = new ItemStack(Material.ENCHANTED_BOOK);
         EnchantmentStorageMeta meta = (EnchantmentStorageMeta) book.getItemMeta();
@@ -148,7 +181,6 @@ public final class StructureChestService implements Listener {
     }
 
     private ItemStack preciousResource(int dangerLevel, RandomGenerator random) {
-        // Алмазы заметно реже золота/изумрудов и в небольшом количестве.
         int roll = random.nextInt(100);
         if (dangerLevel >= 2 && roll < 18 + dangerLevel * 3) {
             int amount = dangerLevel >= 4 && random.nextDouble() < 0.25 ? 2 : 1;
@@ -162,9 +194,6 @@ public final class StructureChestService implements Listener {
         return new ItemStack(Material.GOLD_INGOT, random.nextInt(2, maxGold + 1));
     }
 
-    /**
-     * Небольшая часть обычного дропа охраны переносится в сундуки тематически.
-     */
     private ItemStack rollMobLoot(String structureId, int dangerLevel, RandomGenerator random) {
         String id = structureId == null ? "unknown" : structureId.toLowerCase();
         return switch (id) {
@@ -199,4 +228,6 @@ public final class StructureChestService implements Listener {
     private double capped(double value) {
         return Math.max(0.0, Math.min(1.0, value));
     }
+
+    public record RepairSnapshot(ItemStack[] contents, boolean rewardGenerated) {}
 }
