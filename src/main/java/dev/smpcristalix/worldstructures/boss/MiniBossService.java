@@ -38,10 +38,11 @@ import java.util.concurrent.ThreadLocalRandom;
 import java.util.random.RandomGenerator;
 
 /**
- * Управляет мини-боссами каждой структуры: респавном, независимыми способностями,
- * BossBar, анти-уводом и безопасной обработкой выгруженных чанков.
+ * Runtime мини-боссов: persistence, BossBar, leash, независимые способности и безопасный respawn.
  */
 public final class MiniBossService {
+
+    private static final long MOVEMENT_SAVE_INTERVAL_MILLIS = 5_000L;
 
     private final Plugin plugin;
     private final StructureMobService mobService;
@@ -50,6 +51,8 @@ public final class MiniBossService {
     private final Map<UUID, BossRuntime> runtimes = new HashMap<>();
     private volatile WorldStructuresSettings settings;
     private BukkitTask task;
+    private boolean anchorsDirty;
+    private long lastAnchorSaveMillis;
 
     public MiniBossService(Plugin plugin, WorldStructuresSettings settings, StructureMobService mobService) {
         this.plugin = plugin;
@@ -60,6 +63,7 @@ public final class MiniBossService {
 
     public void start() {
         loadAnchors();
+        lastAnchorSaveMillis = System.currentTimeMillis();
         task = Bukkit.getScheduler().runTaskTimer(plugin, this::tick, 20L, 20L);
     }
 
@@ -90,15 +94,16 @@ public final class MiniBossService {
         WorldStructuresSettings.StructureBossSpec structure = settings.structure(normalized);
         if (structure == null) throw new IllegalArgumentException("Unknown structure: " + structureId);
 
-        int chunkX = location.getBlockX() >> 4;
-        int chunkZ = location.getBlockZ() >> 4;
         BossAnchor anchor = new BossAnchor(
                 instanceId,
                 normalized,
                 location.getWorld().getName(),
                 location.getX(), location.getY(), location.getZ(),
-                structure.bossType(), 0L, null,
-                chunkX, chunkZ
+                structure.bossType(),
+                0L,
+                null,
+                location.getBlockX() >> 4,
+                location.getBlockZ() >> 4
         );
         anchors.put(instanceId, anchor);
         saveAnchors();
@@ -106,11 +111,16 @@ public final class MiniBossService {
         return instanceId;
     }
 
-    public int anchorCount() { return anchors.size(); }
+    public int anchorCount() {
+        return anchors.size();
+    }
 
     public int aliveBossCount() {
         int count = 0;
-        for (BossAnchor anchor : anchors.values()) if (resolveLivingBoss(anchor) != null) count++;
+        for (BossAnchor anchor : anchors.values()) {
+            if (!isLastKnownBossChunkLoaded(anchor)) continue;
+            if (resolveLivingBoss(anchor) != null) count++;
+        }
         return count;
     }
 
@@ -128,7 +138,7 @@ public final class MiniBossService {
     public boolean forceRespawn(String anchorId) {
         BossAnchor anchor = anchors.get(anchorId);
         if (anchor == null) return false;
-        removeCurrentBoss(anchor, true);
+        removeCurrentBoss(anchor, true, true);
         anchor.lastDeathEpochMillis = 0L;
         spawnBoss(anchor, true);
         saveAnchors();
@@ -138,7 +148,7 @@ public final class MiniBossService {
     public boolean forceRemove(String anchorId) {
         BossAnchor anchor = anchors.get(anchorId);
         if (anchor == null) return false;
-        removeCurrentBoss(anchor, true);
+        removeCurrentBoss(anchor, true, true);
         anchor.lastDeathEpochMillis = System.currentTimeMillis();
         saveAnchors();
         return true;
@@ -149,8 +159,7 @@ public final class MiniBossService {
         if (anchor == null) return;
 
         removeLoadedMinions(boss.getUniqueId(), anchor);
-        BossRuntime runtime = runtimes.remove(boss.getUniqueId());
-        if (runtime != null) runtime.bossBar.removeAll();
+        removeRuntime(boss.getUniqueId());
         anchor.lastDeathEpochMillis = System.currentTimeMillis();
         anchor.currentBossId = null;
         saveAnchors();
@@ -162,45 +171,43 @@ public final class MiniBossService {
         long respawnMillis = settings.boss().respawnTicks() * 50L;
 
         for (BossAnchor anchor : new ArrayList<>(anchors.values())) {
-            LivingEntity boss = resolveLivingBoss(anchor);
-            if (boss != null) {
-                BossRuntime runtime = runtimes.computeIfAbsent(
-                        boss.getUniqueId(), ignored -> createRuntime(anchor, boss, now)
-                );
-
-                enforceLeash(anchor, boss);
-                boolean movedChunk = updateLastKnownBossChunk(anchor, boss);
-                updateBossBar(boss, runtime);
-
-                if (hasEngagedPlayer(boss)) {
-                    castDueAbilities(anchor, boss, runtime, now);
-                } else {
-                    postponeOverdueAbilities(runtime, now);
-                }
-
-                if (movedChunk) saveAnchors();
-                continue;
-            }
-
             if (anchor.currentBossId != null) {
-                // Bukkit.getEntity(UUID) возвращает null для сущности в выгруженном чанке.
-                // Пока её последний известный чанк выгружен, UUID нельзя очищать и нельзя создавать дубль.
+                // Сначала смотрим chunk state. Так тысячи боссов из выгруженных данжей не требуют UUID lookup каждый тик.
                 if (!isLastKnownBossChunkLoaded(anchor)) {
-                    BossRuntime runtime = runtimes.remove(anchor.currentBossId);
-                    if (runtime != null) runtime.bossBar.removeAll();
+                    removeRuntime(anchor.currentBossId);
                     continue;
                 }
 
-                BossRuntime runtime = runtimes.remove(anchor.currentBossId);
-                if (runtime != null) runtime.bossBar.removeAll();
+                LivingEntity boss = resolveLivingBoss(anchor);
+                if (boss != null) {
+                    BossRuntime runtime = runtimes.computeIfAbsent(
+                            boss.getUniqueId(), ignored -> createRuntime(anchor, boss, now)
+                    );
+                    enforceLeash(anchor, boss);
+                    if (updateLastKnownBossChunk(anchor, boss)) anchorsDirty = true;
+                    updateBossBar(boss, runtime);
+
+                    if (hasEngagedPlayer(boss)) castDueAbilities(anchor, boss, runtime, now);
+                    else postponeOverdueAbilities(runtime, now);
+                    continue;
+                }
+
+                // Последний известный чанк загружен, но сущности реально нет — это не обычный unload.
+                removeRuntime(anchor.currentBossId);
                 anchor.currentBossId = null;
-                saveAnchors();
+                anchorsDirty = true;
             }
 
-            if (anchor.lastDeathEpochMillis == 0L || now - anchor.lastDeathEpochMillis >= respawnMillis) {
-                spawnBoss(anchor, false);
-            }
+            boolean due = anchor.lastDeathEpochMillis == 0L
+                    || now - anchor.lastDeathEpochMillis >= respawnMillis;
+            if (!due) continue;
+
+            // Фоновый respawn не имеет права будить мир. Босс появится при следующей загрузке anchor-чанка игроком.
+            if (!isAnchorChunkLoaded(anchor)) continue;
+            spawnBoss(anchor, false);
         }
+
+        flushDirtyAnchorsIfDue(now);
     }
 
     private void castDueAbilities(BossAnchor anchor, LivingEntity boss, BossRuntime runtime, long now) {
@@ -215,18 +222,15 @@ public final class MiniBossService {
     private void postponeOverdueAbilities(BossRuntime runtime, long now) {
         for (BossAbility ability : runtime.abilities) {
             long due = runtime.nextAbilityAtMillis.getOrDefault(ability, Long.MAX_VALUE);
-            if (now >= due) runtime.nextAbilityAtMillis.put(ability, now + 1000L);
+            if (now >= due) runtime.nextAbilityAtMillis.put(ability, now + 1_000L);
         }
     }
 
     private boolean hasEngagedPlayer(LivingEntity boss) {
-        double radius = Math.max(
-                24.0,
-                Math.max(
-                        plugin.getConfig().getDouble("runtime.bossbar-radius", 48.0),
-                        plugin.getConfig().getDouble("runtime.boss-leash-radius", 64.0)
-                )
-        );
+        double radius = Math.max(24.0, Math.max(
+                plugin.getConfig().getDouble("runtime.bossbar-radius", 48.0),
+                plugin.getConfig().getDouble("runtime.boss-leash-radius", 64.0)
+        ));
         double max = radius * radius;
         for (Player player : boss.getWorld().getPlayers()) {
             if (!isCombatPlayer(player)) continue;
@@ -236,17 +240,16 @@ public final class MiniBossService {
     }
 
     private void enforceLeash(BossAnchor anchor, LivingEntity boss) {
-        World world = boss.getWorld();
-        Location home = anchor.location(world);
+        Location home = anchor.location(boss.getWorld());
         double radius = Math.max(24.0, plugin.getConfig().getDouble("runtime.boss-leash-radius", 64.0));
         if (boss.getLocation().distanceSquared(home) <= radius * radius) return;
 
         boss.teleport(home);
-        AttributeInstance health = boss.getAttribute(Attribute.GENERIC_MAX_HEALTH);
-        if (health != null) {
+        AttributeInstance maxHealth = boss.getAttribute(Attribute.GENERIC_MAX_HEALTH);
+        if (maxHealth != null) {
             double fraction = Math.max(0.0, Math.min(1.0,
                     plugin.getConfig().getDouble("runtime.boss-return-heal-fraction", 0.25)));
-            boss.setHealth(Math.min(health.getValue(), boss.getHealth() + health.getValue() * fraction));
+            boss.setHealth(Math.min(maxHealth.getValue(), boss.getHealth() + maxHealth.getValue() * fraction));
         }
         boss.getWorld().strikeLightningEffect(home);
     }
@@ -272,7 +275,7 @@ public final class MiniBossService {
             boolean nearby = isCombatPlayer(player)
                     && player.getLocation().distanceSquared(boss.getLocation()) <= radiusSquared;
             if (nearby && !runtime.bossBar.getPlayers().contains(player)) runtime.bossBar.addPlayer(player);
-            if (!nearby && runtime.bossBar.getPlayers().contains(player)) runtime.bossBar.removePlayer(player);
+            else if (!nearby && runtime.bossBar.getPlayers().contains(player)) runtime.bossBar.removePlayer(player);
         }
         for (Player player : new ArrayList<>(runtime.bossBar.getPlayers())) {
             if (!player.isOnline() || !player.getWorld().equals(boss.getWorld()) || !isCombatPlayer(player)) {
@@ -282,12 +285,19 @@ public final class MiniBossService {
     }
 
     private void spawnBoss(BossAnchor anchor, boolean force) {
-        if (!force && resolveLivingBoss(anchor) != null) return;
         World world = Bukkit.getWorld(anchor.worldName);
         if (world == null) return;
 
+        int anchorChunkX = ((int) Math.floor(anchor.x)) >> 4;
+        int anchorChunkZ = ((int) Math.floor(anchor.z)) >> 4;
+        if (!force && !world.isChunkLoaded(anchorChunkX, anchorChunkZ)) return;
+        if (force && !world.isChunkLoaded(anchorChunkX, anchorChunkZ)) {
+            world.getChunkAt(anchorChunkX, anchorChunkZ).load();
+        }
+
+        if (!force && anchor.currentBossId != null && resolveLivingBoss(anchor) != null) return;
+
         Location location = anchor.location(world);
-        world.getChunkAt(location).load();
         Entity spawned = world.spawnEntity(location, anchor.entityType);
         if (!(spawned instanceof LivingEntity boss)) {
             spawned.remove();
@@ -305,8 +315,9 @@ public final class MiniBossService {
 
     private BossRuntime createRuntime(BossAnchor anchor, LivingEntity boss, long now) {
         WorldStructuresSettings.StructureBossSpec spec = settings.structure(anchor.structureId);
-        List<BossAbility> pool = spec == null ? List.of(BossAbility.KNOCKBACK) : spec.abilities();
-        List<BossAbility> selected = selectAbilities(pool);
+        List<BossAbility> selected = selectAbilities(
+                spec == null ? List.of(BossAbility.KNOCKBACK) : spec.abilities()
+        );
 
         EnumMap<BossAbility, Long> nextAbilityAt = new EnumMap<>(BossAbility.class);
         int stagger = 0;
@@ -350,8 +361,10 @@ public final class MiniBossService {
         if (alive >= config.maxAliveMinions()) return;
 
         RandomGenerator random = ThreadLocalRandom.current();
-        int desired = random.nextInt(Math.min(config.summonMin(), config.summonMax()),
-                Math.max(config.summonMin(), config.summonMax()) + 1);
+        int desired = random.nextInt(
+                Math.min(config.summonMin(), config.summonMax()),
+                Math.max(config.summonMin(), config.summonMax()) + 1
+        );
         int count = Math.min(desired, config.maxAliveMinions() - alive);
 
         for (int i = 0; i < count; i++) {
@@ -385,10 +398,11 @@ public final class MiniBossService {
             double angle = random.nextDouble(0.0, Math.PI * 2.0);
             double distance = random.nextDouble(1.5, Math.max(1.6, radius));
             Location candidate = center.clone().add(Math.cos(angle) * distance, 0.0, Math.sin(angle) * distance);
-            boolean feet = candidate.getBlock().isPassable();
-            boolean head = candidate.clone().add(0, 1, 0).getBlock().isPassable();
-            boolean floor = candidate.clone().add(0, -1, 0).getBlock().getType().isSolid();
-            if (feet && head && floor) return candidate;
+            if (candidate.getBlock().isPassable()
+                    && candidate.clone().add(0, 1, 0).getBlock().isPassable()
+                    && candidate.clone().add(0, -1, 0).getBlock().getType().isSolid()) {
+                return candidate;
+            }
         }
         return center.clone();
     }
@@ -414,12 +428,21 @@ public final class MiniBossService {
                 Math.min(config.regenDurationMinTicks(), config.regenDurationMaxTicks()),
                 Math.max(config.regenDurationMinTicks(), config.regenDurationMaxTicks()) + 1
         );
-        PotionEffect effect = new PotionEffect(PotionEffectType.REGENERATION, duration,
-                config.regenAmplifier(), false, true, true);
+        PotionEffect effect = new PotionEffect(
+                PotionEffectType.REGENERATION,
+                duration,
+                config.regenAmplifier(),
+                false,
+                true,
+                true
+        );
         boss.addPotionEffect(effect);
+
         double radius = config.regenRadius();
         for (Entity entity : boss.getNearbyEntities(radius, radius, radius)) {
-            if (entity instanceof LivingEntity living && mobService.isStructureMob(living)) living.addPotionEffect(effect);
+            if (entity instanceof LivingEntity living && mobService.isStructureMob(living)) {
+                living.addPotionEffect(effect);
+            }
         }
     }
 
@@ -430,8 +453,11 @@ public final class MiniBossService {
                 Math.max(config.debuffDurationMinTicks(), config.debuffDurationMaxTicks()) + 1
         );
         PotionEffectType[] effects = {
-                PotionEffectType.SLOWNESS, PotionEffectType.WEAKNESS, PotionEffectType.POISON,
-                PotionEffectType.BLINDNESS, PotionEffectType.WITHER
+                PotionEffectType.SLOWNESS,
+                PotionEffectType.WEAKNESS,
+                PotionEffectType.POISON,
+                PotionEffectType.BLINDNESS,
+                PotionEffectType.WITHER
         };
         double radius = config.debuffRadius();
         RandomGenerator random = ThreadLocalRandom.current();
@@ -445,7 +471,8 @@ public final class MiniBossService {
     }
 
     private boolean isCombatPlayer(Player player) {
-        return player.isOnline() && player.getGameMode() != GameMode.SPECTATOR;
+        GameMode mode = player.getGameMode();
+        return player.isOnline() && (mode == GameMode.SURVIVAL || mode == GameMode.ADVENTURE);
     }
 
     private long randomCooldownMillis() {
@@ -461,25 +488,42 @@ public final class MiniBossService {
         return entity instanceof LivingEntity living && living.isValid() && !living.isDead() ? living : null;
     }
 
+    private boolean isAnchorChunkLoaded(BossAnchor anchor) {
+        World world = Bukkit.getWorld(anchor.worldName);
+        if (world == null) return false;
+        return world.isChunkLoaded(((int) Math.floor(anchor.x)) >> 4, ((int) Math.floor(anchor.z)) >> 4);
+    }
+
     private boolean isLastKnownBossChunkLoaded(BossAnchor anchor) {
         World world = Bukkit.getWorld(anchor.worldName);
         return world != null && world.isChunkLoaded(anchor.lastBossChunkX, anchor.lastBossChunkZ);
     }
 
     private BossAnchor findAnchorByBoss(UUID bossId) {
-        for (BossAnchor anchor : anchors.values()) if (bossId.equals(anchor.currentBossId)) return anchor;
+        for (BossAnchor anchor : anchors.values()) {
+            if (bossId.equals(anchor.currentBossId)) return anchor;
+        }
         return null;
     }
 
-    private void removeCurrentBoss(BossAnchor anchor, boolean cleanupMinions) {
+    private void removeCurrentBoss(BossAnchor anchor, boolean cleanupMinions, boolean loadLastChunk) {
         if (anchor.currentBossId == null) return;
         UUID bossId = anchor.currentBossId;
-        BossRuntime runtime = runtimes.remove(bossId);
-        if (runtime != null) runtime.bossBar.removeAll();
+        World world = Bukkit.getWorld(anchor.worldName);
+        if (loadLastChunk && world != null && !world.isChunkLoaded(anchor.lastBossChunkX, anchor.lastBossChunkZ)) {
+            world.getChunkAt(anchor.lastBossChunkX, anchor.lastBossChunkZ).load();
+        }
+
+        removeRuntime(bossId);
         if (cleanupMinions) removeLoadedMinions(bossId, anchor);
         Entity entity = Bukkit.getEntity(bossId);
         if (entity != null) entity.remove();
         anchor.currentBossId = null;
+    }
+
+    private void removeRuntime(UUID bossId) {
+        BossRuntime runtime = runtimes.remove(bossId);
+        if (runtime != null) runtime.bossBar.removeAll();
     }
 
     private void removeLoadedMinions(UUID bossId, BossAnchor anchor) {
@@ -498,8 +542,15 @@ public final class MiniBossService {
     private BossAnchorInfo info(BossAnchor anchor) {
         World world = Bukkit.getWorld(anchor.worldName);
         Location location = world == null ? null : anchor.location(world);
-        return new BossAnchorInfo(anchor.id, anchor.structureId, anchor.worldName, location,
-                resolveLivingBoss(anchor) != null, anchor.lastDeathEpochMillis);
+        boolean alive = isLastKnownBossChunkLoaded(anchor) && resolveLivingBoss(anchor) != null;
+        return new BossAnchorInfo(
+                anchor.id,
+                anchor.structureId,
+                anchor.worldName,
+                location,
+                alive,
+                anchor.lastDeathEpochMillis
+        );
     }
 
     private double distanceSquared2D(Location a, Location b) {
@@ -508,12 +559,18 @@ public final class MiniBossService {
         return dx * dx + dz * dz;
     }
 
+    private void flushDirtyAnchorsIfDue(long now) {
+        if (!anchorsDirty || now - lastAnchorSaveMillis < MOVEMENT_SAVE_INTERVAL_MILLIS) return;
+        saveAnchors();
+    }
+
     private void loadAnchors() {
         anchors.clear();
         if (!storageFile.exists()) return;
         YamlConfiguration yaml = YamlConfiguration.loadConfiguration(storageFile);
         ConfigurationSection root = yaml.getConfigurationSection("anchors");
         if (root == null) return;
+
         for (String id : root.getKeys(false)) {
             String path = "anchors." + id;
             try {
@@ -562,13 +619,22 @@ public final class MiniBossService {
                 plugin.getLogger().warning("Не удалось создать папку WorldStructures");
             }
             yaml.save(storageFile);
+            anchorsDirty = false;
+            lastAnchorSaveMillis = System.currentTimeMillis();
         } catch (IOException exception) {
+            anchorsDirty = true;
             plugin.getLogger().severe("Не удалось сохранить boss-anchors.yml: " + exception.getMessage());
         }
     }
 
-    public record BossAnchorInfo(String id, String structureId, String worldName, Location location,
-                                 boolean alive, long lastDeathEpochMillis) {}
+    public record BossAnchorInfo(
+            String id,
+            String structureId,
+            String worldName,
+            Location location,
+            boolean alive,
+            long lastDeathEpochMillis
+    ) {}
 
     private static final class BossRuntime {
         private final List<BossAbility> abilities;
@@ -614,6 +680,8 @@ public final class MiniBossService {
             this.lastBossChunkZ = lastBossChunkZ;
         }
 
-        private Location location(World world) { return new Location(world, x, y, z); }
+        private Location location(World world) {
+            return new Location(world, x, y, z);
+        }
     }
 }
