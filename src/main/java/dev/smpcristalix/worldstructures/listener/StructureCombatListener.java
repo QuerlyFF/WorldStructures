@@ -26,13 +26,19 @@ public final class StructureCombatListener implements Listener {
             EntityDamageEvent.DamageCause.LAVA,
             EntityDamageEvent.DamageCause.FIRE,
             EntityDamageEvent.DamageCause.FIRE_TICK,
+            EntityDamageEvent.DamageCause.CAMPFIRE,
+            EntityDamageEvent.DamageCause.HOT_FLOOR,
             EntityDamageEvent.DamageCause.SUFFOCATION,
             EntityDamageEvent.DamageCause.DROWNING,
             EntityDamageEvent.DamageCause.FALL,
             EntityDamageEvent.DamageCause.FLY_INTO_WALL,
             EntityDamageEvent.DamageCause.CRAMMING,
             EntityDamageEvent.DamageCause.CONTACT,
-            EntityDamageEvent.DamageCause.FREEZE
+            EntityDamageEvent.DamageCause.FREEZE,
+            EntityDamageEvent.DamageCause.FALLING_BLOCK,
+            EntityDamageEvent.DamageCause.BLOCK_EXPLOSION,
+            EntityDamageEvent.DamageCause.ENTITY_EXPLOSION,
+            EntityDamageEvent.DamageCause.VOID
     );
 
     private final StructureMobService mobService;
@@ -54,7 +60,7 @@ public final class StructureCombatListener implements Listener {
         if (BLOCKED_BOSS_CAUSES.contains(event.getCause())) event.setCancelled(true);
     }
 
-    @EventHandler(priority = EventPriority.MONITOR)
+    @EventHandler(priority = EventPriority.HIGH)
     public void onDeath(EntityDeathEvent event) {
         LivingEntity entity = event.getEntity();
         if (!mobService.isStructureMob(entity)) return;
@@ -65,8 +71,13 @@ public final class StructureCombatListener implements Listener {
             return;
         }
 
-        // Призванные боссом миньоны не дают монеты, чтобы нельзя было фармить их бесконечно.
-        if (mobService.isSummonedMob(entity)) return;
+        // Миньоны босса бесконечно возобновляемые. Запрещаем не только монеты,
+        // но и vanilla/equipment loot + XP, иначе их можно фармить у живого босса.
+        if (mobService.isSummonedMob(entity)) {
+            event.getDrops().clear();
+            event.setDroppedExp(0);
+            return;
+        }
 
         if (mobService.isEliteMob(entity)) rewardService.dropEliteMobReward(event);
         else rewardService.dropNormalMobReward(event);
