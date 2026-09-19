@@ -1,0 +1,249 @@
+package dev.smpcristalix.worldstructures.mob;
+
+import dev.smpcristalix.worldstructures.config.WorldStructuresSettings;
+import org.bukkit.Location;
+import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
+import org.bukkit.attribute.Attribute;
+import org.bukkit.attribute.AttributeInstance;
+import org.bukkit.enchantments.Enchantment;
+import org.bukkit.entity.Entity;
+import org.bukkit.entity.EntityType;
+import org.bukkit.entity.LivingEntity;
+import org.bukkit.inventory.EntityEquipment;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.persistence.PersistentDataContainer;
+import org.bukkit.persistence.PersistentDataType;
+import org.bukkit.plugin.Plugin;
+import org.bukkit.potion.PotionEffect;
+import org.bukkit.potion.PotionEffectType;
+
+import java.util.UUID;
+import java.util.concurrent.ThreadLocalRandom;
+import java.util.random.RandomGenerator;
+
+/**
+ * Создаёт и помечает обычных, элитных и боссовых мобов структур.
+ */
+public final class StructureMobService {
+
+    private final NamespacedKey structureMobKey;
+    private final NamespacedKey eliteMobKey;
+    private final NamespacedKey miniBossKey;
+    private final NamespacedKey structureIdKey;
+    private final NamespacedKey projectileDamageMultiplierKey;
+    private final NamespacedKey summonedByBossKey;
+    private volatile WorldStructuresSettings settings;
+
+    public StructureMobService(Plugin plugin, WorldStructuresSettings settings) {
+        structureMobKey = new NamespacedKey(plugin, "structure_mob");
+        eliteMobKey = new NamespacedKey(plugin, "elite_mob");
+        miniBossKey = new NamespacedKey(plugin, "mini_boss");
+        structureIdKey = new NamespacedKey(plugin, "structure_id");
+        projectileDamageMultiplierKey = new NamespacedKey(plugin, "projectile_damage_multiplier");
+        summonedByBossKey = new NamespacedKey(plugin, "summoned_by_boss");
+        this.settings = settings;
+    }
+
+    public void reload(WorldStructuresSettings newSettings) {
+        this.settings = newSettings;
+    }
+
+    public LivingEntity spawnStructureMob(Location location, EntityType type, String structureId) {
+        Entity spawned = location.getWorld().spawnEntity(location, type);
+        if (!(spawned instanceof LivingEntity living)) {
+            spawned.remove();
+            throw new IllegalArgumentException("EntityType " + type + " is not a LivingEntity");
+        }
+        prepareStructureMob(living, structureId);
+        return living;
+    }
+
+    public void prepareStructureMob(LivingEntity entity, String structureId) {
+        RandomGenerator random = ThreadLocalRandom.current();
+        boolean elite = random.nextDouble() < settings.eliteChance();
+        prepare(entity, structureId, elite ? settings.eliteMob() : settings.normalMob(), elite, false);
+    }
+
+    public void prepareSummonedMinion(LivingEntity entity, String structureId, UUID bossId) {
+        prepare(entity, structureId, settings.normalMob(), false, false);
+        entity.getPersistentDataContainer().set(summonedByBossKey, PersistentDataType.STRING, bossId.toString());
+    }
+
+    public void prepareMiniBoss(LivingEntity entity, String structureId) {
+        WorldStructuresSettings.BossSpec boss = settings.boss();
+        WorldStructuresSettings.MobTierSpec tier = new WorldStructuresSettings.MobTierSpec(
+                boss.healthMultiplier(), boss.damageMultiplier(), boss.speedMultiplier()
+        );
+        prepare(entity, structureId, tier, true, true);
+        entity.setPersistent(true);
+        entity.setRemoveWhenFarAway(false);
+        entity.addPotionEffect(new PotionEffect(
+                PotionEffectType.RESISTANCE,
+                Integer.MAX_VALUE,
+                boss.resistanceAmplifier(),
+                false,
+                false,
+                true
+        ));
+    }
+
+    public boolean isStructureMob(LivingEntity entity) {
+        return entity.getPersistentDataContainer().has(structureMobKey, PersistentDataType.BYTE);
+    }
+
+    public boolean isEliteMob(LivingEntity entity) {
+        return entity.getPersistentDataContainer().has(eliteMobKey, PersistentDataType.BYTE);
+    }
+
+    public boolean isMiniBoss(LivingEntity entity) {
+        return entity.getPersistentDataContainer().has(miniBossKey, PersistentDataType.BYTE);
+    }
+
+    public boolean isSummonedMob(LivingEntity entity) {
+        return entity.getPersistentDataContainer().has(summonedByBossKey, PersistentDataType.STRING);
+    }
+
+    public String structureId(LivingEntity entity) {
+        return entity.getPersistentDataContainer().get(structureIdKey, PersistentDataType.STRING);
+    }
+
+    public double projectileDamageMultiplier(LivingEntity entity) {
+        Double value = entity.getPersistentDataContainer().get(projectileDamageMultiplierKey, PersistentDataType.DOUBLE);
+        return value == null ? 1.0 : value;
+    }
+
+    public boolean isSummonedBy(LivingEntity entity, UUID bossId) {
+        String owner = entity.getPersistentDataContainer().get(summonedByBossKey, PersistentDataType.STRING);
+        return bossId.toString().equals(owner);
+    }
+
+    private void prepare(LivingEntity entity, String structureId, WorldStructuresSettings.MobTierSpec tier,
+                         boolean elite, boolean boss) {
+        PersistentDataContainer pdc = entity.getPersistentDataContainer();
+        if (pdc.has(structureMobKey, PersistentDataType.BYTE)) return;
+
+        pdc.set(structureMobKey, PersistentDataType.BYTE, (byte) 1);
+        pdc.set(structureIdKey, PersistentDataType.STRING, structureId.toLowerCase());
+        pdc.set(projectileDamageMultiplierKey, PersistentDataType.DOUBLE, tier.damageMultiplier());
+        if (elite) pdc.set(eliteMobKey, PersistentDataType.BYTE, (byte) 1);
+        if (boss) pdc.set(miniBossKey, PersistentDataType.BYTE, (byte) 1);
+
+        multiplyHealth(entity, tier.healthMultiplier());
+        multiplyAttribute(entity, Attribute.GENERIC_ATTACK_DAMAGE, tier.damageMultiplier());
+        multiplyAttribute(entity, Attribute.GENERIC_MOVEMENT_SPEED, tier.speedMultiplier());
+
+        if (boss) {
+            applyBossGear(entity);
+        } else {
+            applyStructureGear(entity, elite);
+        }
+    }
+
+    private void multiplyHealth(LivingEntity entity, double multiplier) {
+        AttributeInstance maxHealth = entity.getAttribute(Attribute.GENERIC_MAX_HEALTH);
+        if (maxHealth == null) return;
+        maxHealth.setBaseValue(maxHealth.getBaseValue() * multiplier);
+        entity.setHealth(maxHealth.getValue());
+    }
+
+    private void multiplyAttribute(LivingEntity entity, Attribute attribute, double multiplier) {
+        AttributeInstance instance = entity.getAttribute(attribute);
+        if (instance == null || multiplier == 1.0) return;
+        instance.setBaseValue(instance.getBaseValue() * multiplier);
+    }
+
+    private void applyStructureGear(LivingEntity entity, boolean elite) {
+        EntityEquipment equipment = entity.getEquipment();
+        if (equipment == null) return;
+
+        RandomGenerator random = ThreadLocalRandom.current();
+        WorldStructuresSettings.GearSpec gear = settings.gear();
+        double diamondChance = elite ? gear.diamondChanceElite() : gear.diamondChanceNormal();
+        int minProtection = elite ? gear.protectionEliteMin() : gear.protectionNormalMin();
+        int maxProtection = elite ? gear.protectionEliteMax() : gear.protectionNormalMax();
+
+        equipment.setHelmet(armor(Material.IRON_HELMET, Material.DIAMOND_HELMET, diamondChance,
+                randomLevel(random, minProtection, maxProtection)));
+        equipment.setChestplate(armor(Material.IRON_CHESTPLATE, Material.DIAMOND_CHESTPLATE, diamondChance,
+                randomLevel(random, minProtection, maxProtection)));
+        equipment.setLeggings(armor(Material.IRON_LEGGINGS, Material.DIAMOND_LEGGINGS, diamondChance,
+                randomLevel(random, minProtection, maxProtection)));
+        equipment.setBoots(armor(Material.IRON_BOOTS, Material.DIAMOND_BOOTS, diamondChance,
+                randomLevel(random, minProtection, maxProtection)));
+        setArmorDropChances(equipment, gear.dropChance());
+        enchantWeapon(equipment.getItemInMainHand(), elite ? 4 : 3);
+        equipment.setItemInMainHandDropChance(gear.dropChance());
+    }
+
+    private void applyBossGear(LivingEntity entity) {
+        EntityEquipment equipment = entity.getEquipment();
+        if (equipment == null) return;
+
+        equipment.setHelmet(enchantedArmor(Material.DIAMOND_HELMET, 4));
+        equipment.setChestplate(enchantedArmor(Material.DIAMOND_CHESTPLATE, 4));
+        equipment.setLeggings(enchantedArmor(Material.DIAMOND_LEGGINGS, 4));
+        equipment.setBoots(enchantedArmor(Material.DIAMOND_BOOTS, 4));
+        setArmorDropChances(equipment, settings.gear().dropChance());
+
+        ItemStack weapon = equipment.getItemInMainHand();
+        enchantWeapon(weapon, 5);
+        equipment.setItemInMainHandDropChance(settings.gear().dropChance());
+    }
+
+    private ItemStack armor(Material iron, Material diamond, double diamondChance, int protectionLevel) {
+        Material material = ThreadLocalRandom.current().nextDouble() < diamondChance ? diamond : iron;
+        return enchantedArmor(material, protectionLevel);
+    }
+
+    private ItemStack enchantedArmor(Material material, int protectionLevel) {
+        ItemStack item = new ItemStack(material);
+        item.addUnsafeEnchantment(Enchantment.PROTECTION, Math.max(1, protectionLevel));
+        item.addUnsafeEnchantment(Enchantment.UNBREAKING, 3);
+        if (protectionLevel >= 4 && ThreadLocalRandom.current().nextDouble() < 0.35) {
+            item.addUnsafeEnchantment(Enchantment.THORNS, 2);
+        }
+        return item;
+    }
+
+    private void enchantWeapon(ItemStack item, int power) {
+        if (item == null || item.getType().isAir()) return;
+        switch (item.getType()) {
+            case BOW -> {
+                item.addUnsafeEnchantment(Enchantment.POWER, Math.max(1, power));
+                item.addUnsafeEnchantment(Enchantment.UNBREAKING, 3);
+                if (power >= 5) item.addUnsafeEnchantment(Enchantment.PUNCH, 2);
+            }
+            case CROSSBOW -> {
+                item.addUnsafeEnchantment(Enchantment.QUICK_CHARGE, 3);
+                item.addUnsafeEnchantment(Enchantment.PIERCING, Math.min(4, Math.max(1, power)));
+                item.addUnsafeEnchantment(Enchantment.UNBREAKING, 3);
+            }
+            case TRIDENT -> {
+                item.addUnsafeEnchantment(Enchantment.IMPALING, Math.min(5, Math.max(1, power)));
+                item.addUnsafeEnchantment(Enchantment.UNBREAKING, 3);
+            }
+            case WOODEN_SWORD, STONE_SWORD, IRON_SWORD, DIAMOND_SWORD, NETHERITE_SWORD,
+                 WOODEN_AXE, STONE_AXE, IRON_AXE, DIAMOND_AXE, NETHERITE_AXE -> {
+                item.addUnsafeEnchantment(Enchantment.SHARPNESS, Math.min(5, Math.max(1, power)));
+                item.addUnsafeEnchantment(Enchantment.UNBREAKING, 3);
+            }
+            default -> {
+                // Оружие неизвестного типа не изменяем.
+            }
+        }
+    }
+
+    private void setArmorDropChances(EntityEquipment equipment, float chance) {
+        equipment.setHelmetDropChance(chance);
+        equipment.setChestplateDropChance(chance);
+        equipment.setLeggingsDropChance(chance);
+        equipment.setBootsDropChance(chance);
+    }
+
+    private int randomLevel(RandomGenerator random, int min, int max) {
+        int low = Math.max(1, Math.min(min, max));
+        int high = Math.max(low, Math.max(min, max));
+        return random.nextInt(low, high + 1);
+    }
+}

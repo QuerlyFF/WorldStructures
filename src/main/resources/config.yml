@@ -1,0 +1,147 @@
+general:
+  enabled: true
+
+structure-mobs:
+  # Обычные мобы внутри структур.
+  health-multiplier: 2.0
+  damage-multiplier: 1.5
+  elite-chance: 0.20
+
+  # Обычный структурный моб: 20-40% на 1-2 бронзовые монеты.
+  bronze-coins:
+    chance-min: 0.20
+    chance-max: 0.40
+    amount-min: 1
+    amount-max: 2
+
+elite-mobs:
+  # Элитные мобы встречаются среди структурных мобов.
+  health-multiplier: 3.0
+  damage-multiplier: 2.0
+  speed-multiplier: 1.15
+
+  # Элитный моб: 30-50% на 2-4 бронзовые монеты.
+  bronze-coins:
+    chance-min: 0.30
+    chance-max: 0.50
+    amount-min: 2
+    amount-max: 4
+
+gear:
+  # Структурные мобы носят минимум железо/алмаз с чарами.
+  diamond-chance-normal: 0.30
+  diamond-chance-elite: 0.60
+  protection-normal-min: 2
+  protection-normal-max: 3
+  protection-elite-min: 3
+  protection-elite-max: 4
+
+  # Шмот нужен для сложности, а не как основной источник алмазок.
+  drop-chance: 0.01
+
+miniboss:
+  health-multiplier: 5.0
+  damage-multiplier: 3.0
+  speed-multiplier: 1.40
+  resistance-amplifier: 0 # Resistance I
+
+  # Босс гарантированно роняет 13-16 бронзовых монет.
+  bronze-coins-min: 13
+  bronze-coins-max: 16
+
+  # Осколок характеристик.
+  shard-drop-chance: 0.05
+
+  # Новый босс может появиться только раз в 2 часа на одну структуру.
+  respawn-seconds: 7200
+
+  abilities-per-boss-min: 1
+  abilities-per-boss-max: 2
+  ability-cooldown-min-seconds: 10
+  ability-cooldown-max-seconds: 15
+
+  summon:
+    min-count: 2
+    max-count: 4
+    max-alive-minions: 12
+    radius: 5.0
+
+  knockback:
+    radius: 9.0
+    horizontal-strength: 1.35
+    vertical-strength: 0.35
+
+  regeneration:
+    radius: 10.0
+    duration-min-seconds: 5
+    duration-max-seconds: 6
+    amplifier: 1 # Regeneration II
+
+  debuff:
+    radius: 10.0
+    duration-min-seconds: 5
+    duration-max-seconds: 8
+
+chests:
+  # Стартовые значения; позже можно индивидуально настроить каждую структуру.
+  bronze-coin-chance: 0.35
+  bronze-coins-min: 2
+  bronze-coins-max: 5
+
+structures:
+  campsite:
+    boss-type: PILLAGER
+    abilities: [SUMMON_MINIONS, KNOCKBACK, RANDOM_DEBUFF]
+    mobs:
+      PILLAGER: [4, 7]
+      VINDICATOR: [1, 2]
+
+  castle:
+    boss-type: VINDICATOR
+    abilities: [SUMMON_MINIONS, REGEN_AURA, KNOCKBACK]
+    mobs:
+      PILLAGER: [4, 7]
+      VINDICATOR: [3, 5]
+      EVOKER: [0, 1]
+
+  graveyard:
+    boss-type: WITHER_SKELETON
+    abilities: [SUMMON_MINIONS, RANDOM_DEBUFF, REGEN_AURA]
+    mobs:
+      SKELETON: [3, 6]
+      STRAY: [1, 3]
+      WITHER_SKELETON: [1, 2]
+
+  lighthouse:
+    boss-type: DROWNED
+    abilities: [SUMMON_MINIONS, KNOCKBACK, REGEN_AURA]
+    mobs:
+      DROWNED: [5, 9]
+
+  observatory:
+    boss-type: EVOKER
+    abilities: [SUMMON_MINIONS, RANDOM_DEBUFF, REGEN_AURA]
+    mobs:
+      PILLAGER: [3, 6]
+      VINDICATOR: [2, 4]
+      EVOKER: [1, 2]
+
+  ship:
+    boss-type: DROWNED
+    abilities: [SUMMON_MINIONS, KNOCKBACK, RANDOM_DEBUFF]
+    mobs:
+      DROWNED: [6, 10]
+
+  windmill:
+    boss-type: PILLAGER
+    abilities: [SUMMON_MINIONS, REGEN_AURA, RANDOM_DEBUFF]
+    mobs:
+      PILLAGER: [4, 7]
+      VINDICATOR: [1, 3]
+
+  ice_castle:
+    boss-type: STRAY
+    abilities: [SUMMON_MINIONS, RANDOM_DEBUFF, KNOCKBACK]
+    mobs:
+      STRAY: [5, 8]
+      SKELETON: [1, 3]

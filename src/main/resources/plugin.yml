@@ -1,0 +1,15 @@
+name: WorldStructures
+version: 1.0.0
+main: dev.smpcristalix.worldstructures.WorldStructuresPlugin
+api-version: '1.21'
+authors: [QuerlyFF]
+description: Custom structures, elite mobs, minibosses and structure rewards for SMP Cristalix.
+commands:
+  worldstructures:
+    aliases: [ws]
+    description: WorldStructures admin commands
+    usage: /ws <status|reload|place|mark|mob|markchest>
+    permission: worldstructures.admin
+permissions:
+  worldstructures.admin:
+    default: op
