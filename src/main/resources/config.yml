@@ -7,9 +7,9 @@ generation:
   # Если список пустой — разрешён любой overworld-мир.
   worlds: []
 
-  # Один кандидат на регион 48x48 чанков; реально появляется в 60% регионов.
-  region-size-chunks: 48
-  # 10 чанков от края соседних регионов дают минимум ~336 блоков между кандидатами.
+  # Регион 24x24 чанка. При margin=10 соседние кандидатные точки
+  # оказываются примерно в 336-432 блоках друг от друга.
+  region-size-chunks: 24
   margin-chunks: 10
   spawn-chance-per-region: 0.60
   min-distance-from-spawn-blocks: 500
@@ -122,8 +122,12 @@ structures:
     power-multiplier: 1.00
     generation:
       enabled: true
-      weight: 16
+      weight: 18
+      chance: 0.95
       placement: LAND
+      biomes: [plains, sunflower_plains, forest, birch_forest, taiga, meadow]
+      min-y: 55
+      max-y: 140
     boss-type: PILLAGER
     abilities: [SUMMON_MINIONS, KNOCKBACK, RANDOM_DEBUFF]
     mobs:
@@ -136,8 +140,12 @@ structures:
     power-multiplier: 1.05
     generation:
       enabled: true
-      weight: 15
+      weight: 16
+      chance: 0.85
       placement: LAND
+      biomes: [plains, sunflower_plains, meadow]
+      min-y: 55
+      max-y: 150
     boss-type: PILLAGER
     abilities: [SUMMON_MINIONS, REGEN_AURA, RANDOM_DEBUFF]
     mobs:
@@ -150,8 +158,12 @@ structures:
     power-multiplier: 1.15
     generation:
       enabled: true
-      weight: 11
+      weight: 12
+      chance: 0.70
       placement: LAND
+      biomes: [forest, dark_forest, taiga, old_growth_pine_taiga, old_growth_spruce_taiga, swamp]
+      min-y: 50
+      max-y: 135
     boss-type: WITHER_SKELETON
     abilities: [SUMMON_MINIONS, RANDOM_DEBUFF, REGEN_AURA]
     mobs:
@@ -166,7 +178,12 @@ structures:
     generation:
       enabled: true
       weight: 8
-      placement: LAND
+      chance: 0.55
+      placement: COAST
+      coast-search-radius: 42
+      biomes: [beach, stony_shore, snowy_beach, plains, forest, taiga]
+      min-y: 50
+      max-y: 110
     boss-type: DROWNED
     abilities: [SUMMON_MINIONS, KNOCKBACK, REGEN_AURA]
     mobs:
@@ -178,8 +195,12 @@ structures:
     power-multiplier: 1.20
     generation:
       enabled: true
-      weight: 7
+      weight: 8
+      chance: 0.50
       placement: WATER
+      biomes: [ocean, deep_ocean, lukewarm_ocean, deep_lukewarm_ocean, cold_ocean, deep_cold_ocean, frozen_ocean, deep_frozen_ocean, warm_ocean]
+      min-y: 45
+      max-y: 90
     boss-type: DROWNED
     abilities: [SUMMON_MINIONS, KNOCKBACK, RANDOM_DEBUFF]
     mobs:
@@ -192,7 +213,11 @@ structures:
     generation:
       enabled: true
       weight: 5
+      chance: 0.35
       placement: LAND
+      biomes: [plains, forest, dark_forest, taiga, meadow]
+      min-y: 60
+      max-y: 145
     boss-type: VINDICATOR
     abilities: [SUMMON_MINIONS, REGEN_AURA, KNOCKBACK]
     mobs:
@@ -207,7 +232,11 @@ structures:
     generation:
       enabled: true
       weight: 5
+      chance: 0.30
       placement: LAND
+      biomes: [snowy_plains, ice_spikes, snowy_taiga, grove, frozen_peaks, jagged_peaks]
+      min-y: 65
+      max-y: 210
     boss-type: STRAY
     abilities: [SUMMON_MINIONS, RANDOM_DEBUFF, KNOCKBACK]
     mobs:
@@ -221,7 +250,11 @@ structures:
     generation:
       enabled: true
       weight: 3
+      chance: 0.20
       placement: LAND
+      biomes: [meadow, grove, jagged_peaks, frozen_peaks, stony_peaks, windswept_hills, windswept_gravelly_hills, windswept_forest]
+      min-y: 100
+      max-y: 245
     boss-type: EVOKER
     abilities: [SUMMON_MINIONS, RANDOM_DEBUFF, REGEN_AURA]
     mobs:
