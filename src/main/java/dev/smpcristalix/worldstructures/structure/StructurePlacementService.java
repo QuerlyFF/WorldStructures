@@ -32,7 +32,7 @@ import java.util.concurrent.ThreadLocalRandom;
 
 /**
  * Загружает NBT-шаблоны из JAR и ставит полностью игровую структуру:
- * постройка -> сундуки -> охрана -> runtime instance -> якорь мини-босса.
+ * постройка -> наши сундуки -> охрана -> runtime instance -> якорь мини-босса.
  */
 public final class StructurePlacementService {
 
@@ -91,6 +91,15 @@ public final class StructurePlacementService {
         return templates.size();
     }
 
+    /** Радиус footprint по худшей горизонтальной стороне NBT; нужен terrain-check генератору. */
+    public int templateHorizontalRadius(String structureId) {
+        Structure structure = templates.get(structureId == null ? null : structureId.toLowerCase());
+        if (structure == null) return 0;
+        BlockVector size = structure.getSize();
+        int side = Math.max(Math.max(1, size.getBlockX()), Math.max(1, size.getBlockZ()));
+        return Math.max(1, (side + 1) / 2);
+    }
+
     public PlacementResult place(String structureId, Location origin) {
         String id = structureId.toLowerCase();
         WorldStructuresSettings.StructureBossSpec spec = settings.structure(id);
@@ -98,15 +107,21 @@ public final class StructurePlacementService {
 
         Structure structure = templates.get(id);
         if (structure == null) throw new IllegalStateException("NBT template is not loaded: " + id);
+        if (origin == null || origin.getWorld() == null) throw new IllegalArgumentException("Structure origin has no world");
 
-        Random random = ThreadLocalRandom.current();
+        ThreadLocalRandom random = ThreadLocalRandom.current();
         StructureRotation rotation = ROTATIONS[random.nextInt(ROTATIONS.length)];
+        long placementSeed = random.nextLong();
+        Random structureRandom = new Random(placementSeed);
+
         Location blockOrigin = origin.clone();
         blockOrigin.setX(Math.floor(blockOrigin.getX()));
         blockOrigin.setY(Math.floor(blockOrigin.getY()));
         blockOrigin.setZ(Math.floor(blockOrigin.getZ()));
 
-        structure.place(blockOrigin, false, rotation, Mirror.NONE, -1, 1.0f, random);
+        // Один и тот же seed сохраняется для repair: если NBT содержит несколько palettes,
+        // восстановление выбирает ту же самую вариацию, а не случайно другую.
+        structure.place(blockOrigin, false, rotation, Mirror.NONE, -1, 1.0f, structureRandom);
 
         Bounds bounds = boundsFor(blockOrigin, structure.getSize(), rotation);
         String instanceId = id + "-" + UUID.randomUUID().toString().substring(0, 8);
@@ -118,11 +133,12 @@ public final class StructurePlacementService {
                 blockOrigin.getBlockX(),
                 blockOrigin.getBlockY(),
                 blockOrigin.getBlockZ(),
-                rotation
+                rotation,
+                placementSeed
         ));
         saveRepairPlacements();
 
-        int containers = markContainers(id, bounds);
+        int containers = initializeContainers(id, bounds);
         int mobs = spawnConfiguredMobs(instanceId, id, spec, bounds, random);
 
         Location bossLocation = findSafeSpawn(bounds.center(), bounds, random);
@@ -131,7 +147,7 @@ public final class StructurePlacementService {
     }
 
     /**
-     * Перепоставляет исходный NBT на ТО ЖЕ место и с ТЕМ ЖЕ поворотом.
+     * Перепоставляет исходный NBT на ТО ЖЕ место, с ТЕМ ЖЕ поворотом и placement seed.
      * Содержимое сундуков и их флаг генерации лута сохраняются, поэтому repair нельзя использовать как дюп.
      */
     public RepairResult repair(StructureInstanceService.InstanceView instance) {
@@ -151,7 +167,15 @@ public final class StructurePlacementService {
 
         Map<BlockPos, StructureChestService.RepairSnapshot> chestSnapshots = snapshotContainers(bounds);
         Location origin = new Location(world, placement.x(), placement.y(), placement.z());
-        structure.place(origin, false, placement.rotation(), Mirror.NONE, -1, 1.0f, ThreadLocalRandom.current());
+        structure.place(
+                origin,
+                false,
+                placement.rotation(),
+                Mirror.NONE,
+                -1,
+                1.0f,
+                new Random(placement.placementSeed())
+        );
 
         int restored = restoreContainersAfterRepair(instance.structureId(), bounds, chestSnapshots);
         return new RepairResult(true, restored, "NBT восстановлен без обновления лута.");
@@ -218,14 +242,14 @@ public final class StructurePlacementService {
         return count;
     }
 
-    private int markContainers(String structureId, Bounds bounds) {
+    private int initializeContainers(String structureId, Bounds bounds) {
         int count = 0;
         World world = bounds.world;
         for (int x = bounds.minX; x <= bounds.maxX; x++) {
             for (int y = bounds.minY; y <= bounds.maxY; y++) {
                 for (int z = bounds.minZ; z <= bounds.maxZ; z++) {
                     if (world.getBlockAt(x, y, z).getState() instanceof Container container) {
-                        chestService.markContainer(container, structureId);
+                        chestService.initializeContainer(container, structureId);
                         count++;
                     }
                 }
@@ -336,6 +360,9 @@ public final class StructurePlacementService {
                 String worldName = yaml.getString(path + ".world");
                 StructureRotation rotation = StructureRotation.valueOf(yaml.getString(path + ".rotation", "NONE"));
                 if (structureId == null || worldName == null) continue;
+                long seed = yaml.contains(path + ".placement-seed")
+                        ? yaml.getLong(path + ".placement-seed")
+                        : legacyRepairSeed(instanceId);
                 repairPlacements.put(instanceId, new RepairPlacement(
                         instanceId,
                         structureId,
@@ -343,7 +370,8 @@ public final class StructurePlacementService {
                         yaml.getInt(path + ".x"),
                         yaml.getInt(path + ".y"),
                         yaml.getInt(path + ".z"),
-                        rotation
+                        rotation,
+                        seed
                 ));
             } catch (IllegalArgumentException ignored) {
                 plugin.getLogger().warning("Некорректные repair-метаданные для " + instanceId);
@@ -361,6 +389,7 @@ public final class StructurePlacementService {
             yaml.set(path + ".y", placement.y());
             yaml.set(path + ".z", placement.z());
             yaml.set(path + ".rotation", placement.rotation().name());
+            yaml.set(path + ".placement-seed", placement.placementSeed());
         }
         try {
             if (!plugin.getDataFolder().exists() && !plugin.getDataFolder().mkdirs()) {
@@ -370,6 +399,14 @@ public final class StructurePlacementService {
         } catch (IOException exception) {
             plugin.getLogger().severe("Не удалось сохранить structure-repair.yml: " + exception.getMessage());
         }
+    }
+
+    private long legacyRepairSeed(String instanceId) {
+        long value = instanceId.hashCode();
+        value ^= value << 21;
+        value ^= value >>> 35;
+        value ^= value << 4;
+        return value;
     }
 
     public record PlacementResult(String structureId,
@@ -390,7 +427,8 @@ public final class StructurePlacementService {
                                    int x,
                                    int y,
                                    int z,
-                                   StructureRotation rotation) {}
+                                   StructureRotation rotation,
+                                   long placementSeed) {}
 
     private record BlockPos(int x, int y, int z) {}
 
