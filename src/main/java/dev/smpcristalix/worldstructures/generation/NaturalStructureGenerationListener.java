@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
@@ -27,7 +28,7 @@ import java.util.Set;
 /**
  * Детерминированно размещает наши NBT-структуры только в новых чанках.
  * На один регион выбирается максимум одна кандидатная точка, поэтому структуры
- * не начинают генерироваться плотной кучей и не меняют позицию после рестарта.
+ * не меняют позицию после рестарта и не появляются плотной кучей.
  */
 public final class NaturalStructureGenerationListener implements Listener {
 
@@ -42,8 +43,8 @@ public final class NaturalStructureGenerationListener implements Listener {
     private boolean placing;
 
     public NaturalStructureGenerationListener(Plugin plugin,
-                                              WorldStructuresSettings worldStructuresSettings,
-                                              StructurePlacementService placementService) {
+                                               WorldStructuresSettings worldStructuresSettings,
+                                               StructurePlacementService placementService) {
         this.plugin = plugin;
         this.worldStructuresSettings = worldStructuresSettings;
         this.placementService = placementService;
@@ -121,26 +122,26 @@ public final class NaturalStructureGenerationListener implements Listener {
         if (dx * dx + dz * dz < minDistance * minDistance) return;
 
         boolean water = isWaterSurface(world, x, z);
-        PlacementKind required = water ? PlacementKind.WATER : PlacementKind.LAND;
+        int y = water
+                ? world.getHighestBlockYAt(x, z, HeightMap.WORLD_SURFACE) + 1
+                : landSurfaceY(world, x, z);
+
         List<Map.Entry<String, StructureGenerationSpec>> candidates = structures.entrySet().stream()
                 .filter(entry -> entry.getValue().enabled())
-                .filter(entry -> entry.getValue().placement() == required)
                 .filter(entry -> entry.getValue().weight() > 0)
+                .filter(entry -> passesStructureChance(candidate, entry.getKey(), entry.getValue()))
+                .filter(entry -> BiomePlacementRules.matchesBiome(
+                        world, x, y, z, entry.getValue().allowedBiomes()))
+                .filter(entry -> BiomePlacementRules.matchesHeight(
+                        y, entry.getValue().minY(), entry.getValue().maxY()))
+                .filter(entry -> matchesPlacement(
+                        world, x, z, water, current, entry.getValue()))
                 .toList();
         if (candidates.isEmpty()) return;
 
         Random random = new Random(candidate.seed() ^ 0x6A09E667F3BCC909L);
         String structureId = weightedChoice(candidates, random);
         if (structureId == null) return;
-
-        int y;
-        if (water) {
-            if (!isOpenWaterArea(world, x, z, current.terrainSampleRadius())) return;
-            y = world.getHighestBlockYAt(x, z, HeightMap.WORLD_SURFACE) + 1;
-        } else {
-            y = landSurfaceY(world, x, z);
-            if (!isAcceptableLand(world, x, z, current.terrainSampleRadius(), current.maxHeightDifference())) return;
-        }
 
         try {
             placing = true;
@@ -160,6 +161,30 @@ public final class NaturalStructureGenerationListener implements Listener {
         } finally {
             placing = false;
         }
+    }
+
+    private boolean passesStructureChance(Candidate candidate,
+                                          String structureId,
+                                          StructureGenerationSpec spec) {
+        long salt = ((long) structureId.hashCode() << 32) ^ structureId.hashCode();
+        Random random = new Random(candidate.seed() ^ salt ^ 0xBB67AE8584CAA73BL);
+        return random.nextDouble() < spec.chance();
+    }
+
+    private boolean matchesPlacement(World world,
+                                     int x,
+                                     int z,
+                                     boolean water,
+                                     GenerationSpec current,
+                                     StructureGenerationSpec spec) {
+        return switch (spec.placement()) {
+            case WATER -> water && isOpenWaterArea(world, x, z, current.terrainSampleRadius());
+            case LAND -> !water && isAcceptableLand(
+                    world, x, z, current.terrainSampleRadius(), current.maxHeightDifference());
+            case COAST -> !water
+                    && isAcceptableLand(world, x, z, current.terrainSampleRadius(), current.maxHeightDifference())
+                    && hasNearbyWater(world, x, z, spec.coastSearchRadius());
+        };
     }
 
     private int landSurfaceY(World world, int x, int z) {
@@ -182,6 +207,26 @@ public final class NaturalStructureGenerationListener implements Listener {
             }
         }
         return checks > 0 && waterChecks >= Math.ceil(checks * 0.75);
+    }
+
+    private boolean hasNearbyWater(World world, int centerX, int centerZ, int radius) {
+        int effectiveRadius = Math.max(8, radius);
+        int step = 6;
+        for (int distance = step; distance <= effectiveRadius; distance += step) {
+            for (int dx = -distance; dx <= distance; dx += step) {
+                if (isWaterSurface(world, centerX + dx, centerZ - distance)
+                        || isWaterSurface(world, centerX + dx, centerZ + distance)) {
+                    return true;
+                }
+            }
+            for (int dz = -distance + step; dz <= distance - step; dz += step) {
+                if (isWaterSurface(world, centerX - distance, centerZ + dz)
+                        || isWaterSurface(world, centerX + distance, centerZ + dz)) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     private boolean isAcceptableLand(World world, int centerX, int centerZ, int radius, int maxDifference) {
@@ -218,8 +263,8 @@ public final class NaturalStructureGenerationListener implements Listener {
     private void readConfig() {
         FileConfiguration config = plugin.getConfig();
         boolean enabled = config.getBoolean("generation.enabled", true);
-        int region = Math.max(16, config.getInt("generation.region-size-chunks", 48));
-        int margin = Math.max(0, config.getInt("generation.margin-chunks", 8));
+        int region = Math.max(16, config.getInt("generation.region-size-chunks", 24));
+        int margin = Math.max(0, config.getInt("generation.margin-chunks", 10));
         double chance = probability(config.getDouble("generation.spawn-chance-per-region", 0.60));
         double minSpawnDistance = Math.max(0.0, config.getDouble("generation.min-distance-from-spawn-blocks", 500.0));
         long delayTicks = Math.max(1L, config.getLong("generation.place-delay-ticks", 10L));
@@ -237,15 +282,32 @@ public final class NaturalStructureGenerationListener implements Listener {
             String root = "structures." + structureId + ".generation";
             boolean structureEnabled = config.getBoolean(root + ".enabled", true);
             int weight = Math.max(0, config.getInt(root + ".weight", 10));
+            double structureChance = probability(config.getDouble(root + ".chance", 1.0));
             PlacementKind placement = parsePlacement(config.getString(root + ".placement", "LAND"));
-            parsed.put(structureId, new StructureGenerationSpec(structureEnabled, weight, placement));
+            int minY = config.getInt(root + ".min-y", Integer.MIN_VALUE);
+            int maxY = config.getInt(root + ".max-y", Integer.MAX_VALUE);
+            int coastSearchRadius = Math.max(8, config.getInt(root + ".coast-search-radius", 36));
+            Set<String> biomes = config.getStringList(root + ".biomes").stream()
+                    .map(value -> value.toLowerCase(Locale.ROOT))
+                    .collect(java.util.stream.Collectors.toUnmodifiableSet());
+
+            parsed.put(structureId, new StructureGenerationSpec(
+                    structureEnabled,
+                    weight,
+                    structureChance,
+                    placement,
+                    biomes,
+                    Math.min(minY, maxY),
+                    Math.max(minY, maxY),
+                    coastSearchRadius
+            ));
         }
         structures = Map.copyOf(parsed);
     }
 
     private PlacementKind parsePlacement(String raw) {
         try {
-            return PlacementKind.valueOf(raw == null ? "LAND" : raw.toUpperCase());
+            return PlacementKind.valueOf(raw == null ? "LAND" : raw.toUpperCase(Locale.ROOT));
         } catch (IllegalArgumentException ignored) {
             return PlacementKind.LAND;
         }
@@ -287,7 +349,8 @@ public final class NaturalStructureGenerationListener implements Listener {
 
     private enum PlacementKind {
         LAND,
-        WATER
+        WATER,
+        COAST
     }
 
     private record GenerationSpec(boolean enabled,
@@ -301,7 +364,14 @@ public final class NaturalStructureGenerationListener implements Listener {
                                   long salt,
                                   Set<String> worlds) {}
 
-    private record StructureGenerationSpec(boolean enabled, int weight, PlacementKind placement) {}
+    private record StructureGenerationSpec(boolean enabled,
+                                           int weight,
+                                           double chance,
+                                           PlacementKind placement,
+                                           Set<String> allowedBiomes,
+                                           int minY,
+                                           int maxY,
+                                           int coastSearchRadius) {}
 
     private record Candidate(String regionKey,
                              int regionX,
