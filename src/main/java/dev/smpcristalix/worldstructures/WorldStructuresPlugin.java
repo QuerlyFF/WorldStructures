@@ -4,6 +4,7 @@ import dev.smpcristalix.worldstructures.boss.MiniBossService;
 import dev.smpcristalix.worldstructures.config.WorldStructuresSettings;
 import dev.smpcristalix.worldstructures.generation.NaturalStructureGenerationListener;
 import dev.smpcristalix.worldstructures.listener.StructureCombatListener;
+import dev.smpcristalix.worldstructures.listener.StructureProtectionListener;
 import dev.smpcristalix.worldstructures.listener.StructureVisualIdentityListener;
 import dev.smpcristalix.worldstructures.loot.StructureChestService;
 import dev.smpcristalix.worldstructures.mob.StructureMobService;
@@ -56,6 +57,9 @@ public final class WorldStructuresPlugin extends JavaPlugin {
         getServer().getPluginManager().registerEvents(
                 new StructureVisualIdentityListener(this, mobService), this
         );
+        getServer().getPluginManager().registerEvents(
+                new StructureProtectionListener(instanceService), this
+        );
         getServer().getPluginManager().registerEvents(chestService, this);
         getServer().getPluginManager().registerEvents(generationListener, this);
 
@@ -93,6 +97,7 @@ public final class WorldStructuresPlugin extends JavaPlugin {
             sender.sendMessage("§7Живых мини-боссов: §f" + miniBossService.aliveBossCount());
             sender.sendMessage("§7Респавн босса: §f" + (settings.boss().respawnTicks() / 20 / 60) + " мин");
             sender.sendMessage("§7Респавн охраны: §f" + getConfig().getLong("runtime.guard-respawn-seconds", 7200L) / 60 + " мин");
+            sender.sendMessage("§7Защита структур: §aвключена");
             return true;
         }
 
@@ -165,6 +170,28 @@ public final class WorldStructuresPlugin extends JavaPlugin {
             instanceService.resetGuards(instance.instanceId());
             miniBossService.forceRespawn(instance.instanceId());
             player.sendMessage("§aСтруктура сброшена: охрана и мини-босс восстановлены. Сундуки не перезаполнялись.");
+            return true;
+        }
+
+        if (args[0].equalsIgnoreCase("repair")) {
+            if (args.length < 2) {
+                player.sendMessage("§cИспользование: /ws repair <instanceId>");
+                return true;
+            }
+            StructureInstanceService.InstanceView instance = instanceService.get(args[1]);
+            if (instance == null) {
+                player.sendMessage("§cInstance не найден: §f" + args[1]);
+                return true;
+            }
+            StructurePlacementService.RepairResult result = placementService.repair(instance);
+            if (!result.success()) {
+                player.sendMessage("§cRepair не выполнен: §f" + result.message());
+                return true;
+            }
+            instanceService.resetGuards(instance.instanceId());
+            miniBossService.forceRespawn(instance.instanceId());
+            player.sendMessage("§aСтруктура восстановлена из NBT: §f" + instance.instanceId());
+            player.sendMessage("§7Контейнеров восстановлено без обновления лута: §f" + result.containersRestored());
             return true;
         }
 
@@ -248,7 +275,7 @@ public final class WorldStructuresPlugin extends JavaPlugin {
             return true;
         }
 
-        player.sendMessage("§cИспользование: /ws <status|reload|locate|boss|reset|debug|place|mark|mob|markchest>");
+        player.sendMessage("§cИспользование: /ws <status|reload|locate|boss|reset|repair|debug|place|mark|mob|markchest>");
         return true;
     }
 
