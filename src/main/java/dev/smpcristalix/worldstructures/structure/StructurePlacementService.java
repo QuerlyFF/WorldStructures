@@ -5,21 +5,26 @@ import dev.smpcristalix.worldstructures.config.WorldStructuresSettings;
 import dev.smpcristalix.worldstructures.loot.StructureChestService;
 import dev.smpcristalix.worldstructures.mob.StructureMobService;
 import dev.smpcristalix.worldstructures.runtime.StructureInstanceService;
+import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.World;
 import org.bukkit.block.Block;
 import org.bukkit.block.Container;
 import org.bukkit.block.structure.Mirror;
 import org.bukkit.block.structure.StructureRotation;
+import org.bukkit.configuration.ConfigurationSection;
+import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.LivingEntity;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.structure.Structure;
 import org.bukkit.util.BlockVector;
 
+import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.Random;
 import java.util.UUID;
@@ -38,7 +43,9 @@ public final class StructurePlacementService {
     private final MiniBossService bossService;
     private final StructureChestService chestService;
     private final StructureInstanceService instanceService;
+    private final File repairMetadataFile;
     private final Map<String, Structure> templates = new HashMap<>();
+    private final Map<String, RepairPlacement> repairPlacements = new HashMap<>();
     private volatile WorldStructuresSettings settings;
 
     public StructurePlacementService(Plugin plugin,
@@ -53,6 +60,8 @@ public final class StructurePlacementService {
         this.bossService = bossService;
         this.chestService = chestService;
         this.instanceService = instanceService;
+        this.repairMetadataFile = new File(plugin.getDataFolder(), "structure-repair.yml");
+        loadRepairPlacements();
     }
 
     public void loadTemplates() {
@@ -75,6 +84,7 @@ public final class StructurePlacementService {
     public void reload(WorldStructuresSettings newSettings) {
         settings = newSettings;
         loadTemplates();
+        loadRepairPlacements();
     }
 
     public int loadedTemplateCount() {
@@ -101,6 +111,16 @@ public final class StructurePlacementService {
         Bounds bounds = boundsFor(blockOrigin, structure.getSize(), rotation);
         String instanceId = id + "-" + UUID.randomUUID().toString().substring(0, 8);
         instanceService.registerInstance(instanceId, id, bounds.toData());
+        repairPlacements.put(instanceId, new RepairPlacement(
+                instanceId,
+                id,
+                blockOrigin.getWorld().getName(),
+                blockOrigin.getBlockX(),
+                blockOrigin.getBlockY(),
+                blockOrigin.getBlockZ(),
+                rotation
+        ));
+        saveRepairPlacements();
 
         int containers = markContainers(id, bounds);
         int mobs = spawnConfiguredMobs(instanceId, id, spec, bounds, random);
@@ -108,6 +128,33 @@ public final class StructurePlacementService {
         Location bossLocation = findSafeSpawn(bounds.center(), bounds, random);
         String anchorId = bossService.registerAnchor(instanceId, id, bossLocation);
         return new PlacementResult(id, instanceId, rotation, bounds.sizeX(), bounds.sizeY(), bounds.sizeZ(), containers, mobs, anchorId);
+    }
+
+    /**
+     * Перепоставляет исходный NBT на ТО ЖЕ место и с ТЕМ ЖЕ поворотом.
+     * Содержимое сундуков и их флаг генерации лута сохраняются, поэтому repair нельзя использовать как дюп.
+     */
+    public RepairResult repair(StructureInstanceService.InstanceView instance) {
+        if (instance == null) return new RepairResult(false, 0, "Экземпляр структуры не найден.");
+        RepairPlacement placement = repairPlacements.get(instance.instanceId());
+        if (placement == null) {
+            return new RepairResult(false, 0,
+                    "У этого старого instance нет repair-метаданных. Перепоставь его через /ws place один раз.");
+        }
+        Structure structure = templates.get(instance.structureId());
+        if (structure == null) return new RepairResult(false, 0, "NBT шаблон не загружен: " + instance.structureId());
+        World world = Bukkit.getWorld(placement.worldName());
+        if (world == null) return new RepairResult(false, 0, "Мир структуры не загружен: " + placement.worldName());
+
+        Bounds bounds = Bounds.from(instance.bounds());
+        if (bounds.world == null) return new RepairResult(false, 0, "Мир структуры недоступен.");
+
+        Map<BlockPos, StructureChestService.RepairSnapshot> chestSnapshots = snapshotContainers(bounds);
+        Location origin = new Location(world, placement.x(), placement.y(), placement.z());
+        structure.place(origin, false, placement.rotation(), Mirror.NONE, -1, 1.0f, ThreadLocalRandom.current());
+
+        int restored = restoreContainersAfterRepair(instance.structureId(), bounds, chestSnapshots);
+        return new RepairResult(true, restored, "NBT восстановлен без обновления лута.");
     }
 
     public int respawnGuards(StructureInstanceService.InstanceView instance) {
@@ -137,6 +184,38 @@ public final class StructurePlacementService {
             if (instance.instanceId().equals(mobService.structureInstanceId(living))) living.remove();
         }
         return respawnGuards(instance);
+    }
+
+    private Map<BlockPos, StructureChestService.RepairSnapshot> snapshotContainers(Bounds bounds) {
+        Map<BlockPos, StructureChestService.RepairSnapshot> snapshots = new LinkedHashMap<>();
+        World world = bounds.world;
+        for (int x = bounds.minX; x <= bounds.maxX; x++) {
+            for (int y = bounds.minY; y <= bounds.maxY; y++) {
+                for (int z = bounds.minZ; z <= bounds.maxZ; z++) {
+                    if (world.getBlockAt(x, y, z).getState() instanceof Container container) {
+                        snapshots.put(new BlockPos(x, y, z), chestService.snapshotForRepair(container));
+                    }
+                }
+            }
+        }
+        return snapshots;
+    }
+
+    private int restoreContainersAfterRepair(String structureId,
+                                             Bounds bounds,
+                                             Map<BlockPos, StructureChestService.RepairSnapshot> snapshots) {
+        int count = 0;
+        World world = bounds.world;
+        for (int x = bounds.minX; x <= bounds.maxX; x++) {
+            for (int y = bounds.minY; y <= bounds.maxY; y++) {
+                for (int z = bounds.minZ; z <= bounds.maxZ; z++) {
+                    if (!(world.getBlockAt(x, y, z).getState() instanceof Container container)) continue;
+                    chestService.restoreAfterRepair(container, structureId, snapshots.get(new BlockPos(x, y, z)));
+                    count++;
+                }
+            }
+        }
+        return count;
     }
 
     private int markContainers(String structureId, Bounds bounds) {
@@ -244,6 +323,55 @@ public final class StructurePlacementService {
         };
     }
 
+    private void loadRepairPlacements() {
+        repairPlacements.clear();
+        if (!repairMetadataFile.exists()) return;
+        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(repairMetadataFile);
+        ConfigurationSection root = yaml.getConfigurationSection("instances");
+        if (root == null) return;
+        for (String instanceId : root.getKeys(false)) {
+            String path = "instances." + instanceId;
+            try {
+                String structureId = yaml.getString(path + ".structure-id");
+                String worldName = yaml.getString(path + ".world");
+                StructureRotation rotation = StructureRotation.valueOf(yaml.getString(path + ".rotation", "NONE"));
+                if (structureId == null || worldName == null) continue;
+                repairPlacements.put(instanceId, new RepairPlacement(
+                        instanceId,
+                        structureId,
+                        worldName,
+                        yaml.getInt(path + ".x"),
+                        yaml.getInt(path + ".y"),
+                        yaml.getInt(path + ".z"),
+                        rotation
+                ));
+            } catch (IllegalArgumentException ignored) {
+                plugin.getLogger().warning("Некорректные repair-метаданные для " + instanceId);
+            }
+        }
+    }
+
+    private void saveRepairPlacements() {
+        YamlConfiguration yaml = new YamlConfiguration();
+        for (RepairPlacement placement : repairPlacements.values()) {
+            String path = "instances." + placement.instanceId();
+            yaml.set(path + ".structure-id", placement.structureId());
+            yaml.set(path + ".world", placement.worldName());
+            yaml.set(path + ".x", placement.x());
+            yaml.set(path + ".y", placement.y());
+            yaml.set(path + ".z", placement.z());
+            yaml.set(path + ".rotation", placement.rotation().name());
+        }
+        try {
+            if (!plugin.getDataFolder().exists() && !plugin.getDataFolder().mkdirs()) {
+                plugin.getLogger().warning("Не удалось создать папку WorldStructures");
+            }
+            yaml.save(repairMetadataFile);
+        } catch (IOException exception) {
+            plugin.getLogger().severe("Не удалось сохранить structure-repair.yml: " + exception.getMessage());
+        }
+    }
+
     public record PlacementResult(String structureId,
                                   String instanceId,
                                   StructureRotation rotation,
@@ -253,6 +381,18 @@ public final class StructurePlacementService {
                                   int containersMarked,
                                   int mobsSpawned,
                                   String bossAnchorId) {}
+
+    public record RepairResult(boolean success, int containersRestored, String message) {}
+
+    private record RepairPlacement(String instanceId,
+                                   String structureId,
+                                   String worldName,
+                                   int x,
+                                   int y,
+                                   int z,
+                                   StructureRotation rotation) {}
+
+    private record BlockPos(int x, int y, int z) {}
 
     private static final class Bounds {
         private final World world;
@@ -274,7 +414,7 @@ public final class StructurePlacementService {
         }
 
         private static Bounds from(StructureInstanceService.BoundsData data) {
-            World world = data == null ? null : org.bukkit.Bukkit.getWorld(data.worldName());
+            World world = data == null ? null : Bukkit.getWorld(data.worldName());
             if (data == null) return new Bounds(world, 0, 0, 0, 0, 0, 0);
             return new Bounds(world, data.minX(), data.maxX(), data.minY(), data.maxY(), data.minZ(), data.maxZ());
         }
