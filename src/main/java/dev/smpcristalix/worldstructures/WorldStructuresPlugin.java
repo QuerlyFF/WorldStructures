@@ -5,7 +5,6 @@ import dev.smpcristalix.worldstructures.config.WorldStructuresSettings;
 import dev.smpcristalix.worldstructures.generation.NaturalStructureGenerationListener;
 import dev.smpcristalix.worldstructures.listener.StructureCombatListener;
 import dev.smpcristalix.worldstructures.listener.StructureProtectionListener;
-import dev.smpcristalix.worldstructures.listener.StructureVisualIdentityListener;
 import dev.smpcristalix.worldstructures.loot.StructureChestService;
 import dev.smpcristalix.worldstructures.mob.StructureMobService;
 import dev.smpcristalix.worldstructures.reward.RewardService;
@@ -20,9 +19,7 @@ import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
 import org.bukkit.plugin.java.JavaPlugin;
 
-/**
- * Главный класс WorldStructures.
- */
+/** Главный класс WorldStructures. */
 public final class WorldStructuresPlugin extends JavaPlugin {
 
     private WorldStructuresSettings settings;
@@ -53,9 +50,6 @@ public final class WorldStructuresPlugin extends JavaPlugin {
 
         getServer().getPluginManager().registerEvents(
                 new StructureCombatListener(mobService, rewardService, miniBossService), this
-        );
-        getServer().getPluginManager().registerEvents(
-                new StructureVisualIdentityListener(this, mobService), this
         );
         getServer().getPluginManager().registerEvents(
                 new StructureProtectionListener(instanceService), this
