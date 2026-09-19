@@ -8,9 +8,9 @@ generation:
   worlds: []
 
   # Один кандидат на регион 48x48 чанков; реально появляется в 60% регионов.
-  # Это даёт структурам редкость и не забивает карту постройками.
   region-size-chunks: 48
-  margin-chunks: 8
+  # 10 чанков от края соседних регионов дают минимум ~336 блоков между кандидатами.
+  margin-chunks: 10
   spawn-chance-per-region: 0.60
   min-distance-from-spawn-blocks: 500
   place-delay-ticks: 10
@@ -21,7 +21,6 @@ generation:
   max-height-difference: 7
 
 structure-mobs:
-  # Обычные мобы внутри структур.
   health-multiplier: 2.0
   damage-multiplier: 1.5
   elite-chance: 0.20
@@ -34,7 +33,6 @@ structure-mobs:
     amount-max: 2
 
 elite-mobs:
-  # Элитные мобы встречаются среди структурных мобов.
   health-multiplier: 3.0
   damage-multiplier: 2.0
   speed-multiplier: 1.15
@@ -48,14 +46,20 @@ elite-mobs:
 
 gear:
   # Структурные мобы носят минимум железо/алмаз с чарами.
-  diamond-chance-normal: 0.30
-  diamond-chance-elite: 0.60
+  diamond-chance-normal: 0.40
+  # Элитки чаще всего в алмазке.
+  diamond-chance-elite: 0.80
   protection-normal-min: 2
   protection-normal-max: 3
   protection-elite-min: 3
   protection-elite-max: 4
 
-  # Шмот нужен для сложности, а не как основной источник алмазок.
+  # Мини-босс: смесь алмазной и незеритовой брони, Protection II-III.
+  boss-netherite-piece-chance: 0.60
+  boss-protection-min: 2
+  boss-protection-max: 3
+
+  # Шмот нужен для сложности, а не как основной источник алмазок/незеритки.
   drop-chance: 0.01
 
 miniboss:
@@ -64,14 +68,9 @@ miniboss:
   speed-multiplier: 1.40
   resistance-amplifier: 0 # Resistance I
 
-  # Босс гарантированно роняет 13-16 бронзовых монет.
   bronze-coins-min: 13
   bronze-coins-max: 16
-
-  # Осколок характеристик.
   shard-drop-chance: 0.05
-
-  # Новый босс может появиться только раз в 2 часа на одну структуру.
   respawn-seconds: 7200
 
   abilities-per-boss-min: 1
@@ -107,11 +106,23 @@ chests:
   bronze-coins-min: 2
   bronze-coins-max: 5
 
+  # Ценный лут ограничен: обычно 1-2 попытки, редкие структуры получают бонус.
+  valuable-rolls-min: 1
+  valuable-rolls-max: 2
+  valuable-roll-chance: 0.45
+  enchanted-book-weight: 25
+  experience-bottle-weight: 35
+  precious-resource-weight: 40
+  mob-loot-chance: 0.60
+
 structures:
   campsite:
+    danger-level: 1
+    elite-chance: 0.20
+    power-multiplier: 1.00
     generation:
       enabled: true
-      weight: 14
+      weight: 16
       placement: LAND
     boss-type: PILLAGER
     abilities: [SUMMON_MINIONS, KNOCKBACK, RANDOM_DEBUFF]
@@ -119,22 +130,27 @@ structures:
       PILLAGER: [4, 7]
       VINDICATOR: [1, 2]
 
-  castle:
+  windmill:
+    danger-level: 1
+    elite-chance: 0.22
+    power-multiplier: 1.05
     generation:
       enabled: true
-      weight: 7
+      weight: 15
       placement: LAND
-    boss-type: VINDICATOR
-    abilities: [SUMMON_MINIONS, REGEN_AURA, KNOCKBACK]
+    boss-type: PILLAGER
+    abilities: [SUMMON_MINIONS, REGEN_AURA, RANDOM_DEBUFF]
     mobs:
       PILLAGER: [4, 7]
-      VINDICATOR: [3, 5]
-      EVOKER: [0, 1]
+      VINDICATOR: [1, 3]
 
   graveyard:
+    danger-level: 2
+    elite-chance: 0.28
+    power-multiplier: 1.15
     generation:
       enabled: true
-      weight: 12
+      weight: 11
       placement: LAND
     boss-type: WITHER_SKELETON
     abilities: [SUMMON_MINIONS, RANDOM_DEBUFF, REGEN_AURA]
@@ -144,55 +160,71 @@ structures:
       WITHER_SKELETON: [1, 2]
 
   lighthouse:
+    danger-level: 2
+    elite-chance: 0.28
+    power-multiplier: 1.15
     generation:
       enabled: true
-      weight: 6
+      weight: 8
       placement: LAND
     boss-type: DROWNED
     abilities: [SUMMON_MINIONS, KNOCKBACK, REGEN_AURA]
     mobs:
       DROWNED: [5, 9]
 
-  observatory:
-    generation:
-      enabled: true
-      weight: 5
-      placement: LAND
-    boss-type: EVOKER
-    abilities: [SUMMON_MINIONS, RANDOM_DEBUFF, REGEN_AURA]
-    mobs:
-      PILLAGER: [3, 6]
-      VINDICATOR: [2, 4]
-      EVOKER: [1, 2]
-
   ship:
+    danger-level: 2
+    elite-chance: 0.30
+    power-multiplier: 1.20
     generation:
       enabled: true
-      weight: 12
+      weight: 7
       placement: WATER
     boss-type: DROWNED
     abilities: [SUMMON_MINIONS, KNOCKBACK, RANDOM_DEBUFF]
     mobs:
       DROWNED: [6, 10]
 
-  windmill:
+  castle:
+    danger-level: 3
+    elite-chance: 0.35
+    power-multiplier: 1.30
     generation:
       enabled: true
-      weight: 14
+      weight: 5
       placement: LAND
-    boss-type: PILLAGER
-    abilities: [SUMMON_MINIONS, REGEN_AURA, RANDOM_DEBUFF]
+    boss-type: VINDICATOR
+    abilities: [SUMMON_MINIONS, REGEN_AURA, KNOCKBACK]
     mobs:
-      PILLAGER: [4, 7]
-      VINDICATOR: [1, 3]
+      PILLAGER: [5, 8]
+      VINDICATOR: [3, 6]
+      EVOKER: [1, 2]
 
   ice_castle:
+    danger-level: 3
+    elite-chance: 0.38
+    power-multiplier: 1.35
     generation:
       enabled: true
-      weight: 6
+      weight: 5
       placement: LAND
     boss-type: STRAY
     abilities: [SUMMON_MINIONS, RANDOM_DEBUFF, KNOCKBACK]
     mobs:
-      STRAY: [5, 8]
-      SKELETON: [1, 3]
+      STRAY: [6, 9]
+      SKELETON: [2, 4]
+
+  observatory:
+    danger-level: 4
+    elite-chance: 0.42
+    power-multiplier: 1.45
+    generation:
+      enabled: true
+      weight: 3
+      placement: LAND
+    boss-type: EVOKER
+    abilities: [SUMMON_MINIONS, RANDOM_DEBUFF, REGEN_AURA]
+    mobs:
+      PILLAGER: [4, 7]
+      VINDICATOR: [3, 5]
+      EVOKER: [2, 3]

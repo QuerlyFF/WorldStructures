@@ -48,12 +48,15 @@ public final class WorldStructuresSettings {
         eliteCoins = readDropRule(config, "elite-mobs.bronze-coins", 0.30, 0.50, 2, 4);
 
         gear = new GearSpec(
-                probability(config.getDouble("gear.diamond-chance-normal", 0.30)),
-                probability(config.getDouble("gear.diamond-chance-elite", 0.60)),
+                probability(config.getDouble("gear.diamond-chance-normal", 0.40)),
+                probability(config.getDouble("gear.diamond-chance-elite", 0.80)),
                 positiveInt(config.getInt("gear.protection-normal-min", 2), 1),
                 positiveInt(config.getInt("gear.protection-normal-max", 3), 1),
                 positiveInt(config.getInt("gear.protection-elite-min", 3), 1),
                 positiveInt(config.getInt("gear.protection-elite-max", 4), 1),
+                probability(config.getDouble("gear.boss-netherite-piece-chance", 0.60)),
+                positiveInt(config.getInt("gear.boss-protection-min", 2), 1),
+                positiveInt(config.getInt("gear.boss-protection-max", 3), 1),
                 (float) probability(config.getDouble("gear.drop-chance", 0.01))
         );
 
@@ -89,10 +92,17 @@ public final class WorldStructuresSettings {
         chest = new ChestSpec(
                 probability(config.getDouble("chests.bronze-coin-chance", 0.35)),
                 positiveInt(config.getInt("chests.bronze-coins-min", 2), 1),
-                positiveInt(config.getInt("chests.bronze-coins-max", 5), 1)
+                positiveInt(config.getInt("chests.bronze-coins-max", 5), 1),
+                positiveInt(config.getInt("chests.valuable-rolls-min", 1), 1),
+                positiveInt(config.getInt("chests.valuable-rolls-max", 2), 1),
+                probability(config.getDouble("chests.valuable-roll-chance", 0.45)),
+                Math.max(0, config.getInt("chests.enchanted-book-weight", 25)),
+                Math.max(0, config.getInt("chests.experience-bottle-weight", 35)),
+                Math.max(0, config.getInt("chests.precious-resource-weight", 40)),
+                probability(config.getDouble("chests.mob-loot-chance", 0.60))
         );
 
-        structures = Collections.unmodifiableMap(readStructures(config));
+        structures = Collections.unmodifiableMap(readStructures(config, eliteChance));
     }
 
     public static WorldStructuresSettings from(FileConfiguration config) {
@@ -111,10 +121,10 @@ public final class WorldStructuresSettings {
     public Map<String, StructureBossSpec> structures() { return structures; }
 
     public StructureBossSpec structure(String id) {
-        return structures.get(id.toLowerCase());
+        return id == null ? null : structures.get(id.toLowerCase());
     }
 
-    private static Map<String, StructureBossSpec> readStructures(FileConfiguration config) {
+    private static Map<String, StructureBossSpec> readStructures(FileConfiguration config, double defaultEliteChance) {
         Map<String, StructureBossSpec> result = new LinkedHashMap<>();
         ConfigurationSection root = config.getConfigurationSection("structures");
         if (root == null) return result;
@@ -141,7 +151,18 @@ public final class WorldStructuresSettings {
             List<MobSpawnSpec> mobs = readMobSpawns(config, path + ".mobs");
             if (mobs.isEmpty()) mobs = List.of(new MobSpawnSpec(type, 4, 7));
 
-            result.put(key.toLowerCase(), new StructureBossSpec(type, List.copyOf(abilities), List.copyOf(mobs)));
+            int dangerLevel = Math.max(1, config.getInt(path + ".danger-level", 1));
+            double structureEliteChance = probability(config.getDouble(path + ".elite-chance", defaultEliteChance));
+            double powerMultiplier = positive(config.getDouble(path + ".power-multiplier", 1.0), 1.0);
+
+            result.put(key.toLowerCase(), new StructureBossSpec(
+                    type,
+                    List.copyOf(abilities),
+                    List.copyOf(mobs),
+                    dangerLevel,
+                    structureEliteChance,
+                    powerMultiplier
+            ));
         }
         return result;
     }
@@ -206,6 +227,8 @@ public final class WorldStructuresSettings {
     public record GearSpec(double diamondChanceNormal, double diamondChanceElite,
                            int protectionNormalMin, int protectionNormalMax,
                            int protectionEliteMin, int protectionEliteMax,
+                           double bossNetheritePieceChance,
+                           int bossProtectionMin, int bossProtectionMax,
                            float dropChance) {}
 
     public record BossSpec(double healthMultiplier, double damageMultiplier, double speedMultiplier,
@@ -219,7 +242,18 @@ public final class WorldStructuresSettings {
                            int regenAmplifier, double debuffRadius,
                            int debuffDurationMinTicks, int debuffDurationMaxTicks) {}
 
-    public record ChestSpec(double coinChance, int amountMin, int amountMax) {}
+    public record ChestSpec(double coinChance, int amountMin, int amountMax,
+                            int valuableRollsMin, int valuableRollsMax,
+                            double valuableRollChance,
+                            int enchantedBookWeight, int experienceBottleWeight, int preciousResourceWeight,
+                            double mobLootChance) {}
+
     public record MobSpawnSpec(EntityType type, int minCount, int maxCount) {}
-    public record StructureBossSpec(EntityType bossType, List<BossAbility> abilities, List<MobSpawnSpec> mobs) {}
+
+    public record StructureBossSpec(EntityType bossType,
+                                    List<BossAbility> abilities,
+                                    List<MobSpawnSpec> mobs,
+                                    int dangerLevel,
+                                    double eliteChance,
+                                    double powerMultiplier) {}
 }

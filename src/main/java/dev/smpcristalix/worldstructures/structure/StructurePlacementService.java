@@ -10,14 +10,12 @@ import org.bukkit.block.Block;
 import org.bukkit.block.Container;
 import org.bukkit.block.structure.Mirror;
 import org.bukkit.block.structure.StructureRotation;
-import org.bukkit.entity.EntityType;
 import org.bukkit.plugin.Plugin;
 import org.bukkit.structure.Structure;
 import org.bukkit.util.BlockVector;
 
 import java.io.IOException;
 import java.io.InputStream;
-import java.util.EnumSet;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Random;
@@ -95,7 +93,7 @@ public final class StructurePlacementService {
         structure.place(blockOrigin, false, rotation, Mirror.NONE, -1, 1.0f, random);
 
         Bounds bounds = boundsFor(blockOrigin, structure.getSize(), rotation);
-        int containers = markContainers(bounds);
+        int containers = markContainers(id, bounds);
         int mobs = spawnConfiguredMobs(id, spec, bounds, random);
 
         Location bossLocation = findSafeSpawn(bounds.center(), bounds, random);
@@ -103,14 +101,14 @@ public final class StructurePlacementService {
         return new PlacementResult(id, rotation, bounds.sizeX(), bounds.sizeY(), bounds.sizeZ(), containers, mobs, anchorId);
     }
 
-    private int markContainers(Bounds bounds) {
+    private int markContainers(String structureId, Bounds bounds) {
         int count = 0;
         World world = bounds.world;
         for (int x = bounds.minX; x <= bounds.maxX; x++) {
             for (int y = bounds.minY; y <= bounds.maxY; y++) {
                 for (int z = bounds.minZ; z <= bounds.maxZ; z++) {
                     if (world.getBlockAt(x, y, z).getState() instanceof Container container) {
-                        chestService.markContainer(container);
+                        chestService.markContainer(container, structureId);
                         count++;
                     }
                 }

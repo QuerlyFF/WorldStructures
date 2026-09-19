@@ -60,20 +60,32 @@ public final class StructureMobService {
     }
 
     public void prepareStructureMob(LivingEntity entity, String structureId) {
+        WorldStructuresSettings.StructureBossSpec structure = settings.structure(structureId);
+        double eliteChance = structure == null ? settings.eliteChance() : structure.eliteChance();
+        double power = structure == null ? 1.0 : structure.powerMultiplier();
+
         RandomGenerator random = ThreadLocalRandom.current();
-        boolean elite = random.nextDouble() < settings.eliteChance();
-        prepare(entity, structureId, elite ? settings.eliteMob() : settings.normalMob(), elite, false);
+        boolean elite = random.nextDouble() < eliteChance;
+        WorldStructuresSettings.MobTierSpec base = elite ? settings.eliteMob() : settings.normalMob();
+        prepare(entity, structureId, scaleTier(base, power), elite, false);
     }
 
     public void prepareSummonedMinion(LivingEntity entity, String structureId, UUID bossId) {
-        prepare(entity, structureId, settings.normalMob(), false, false);
+        WorldStructuresSettings.StructureBossSpec structure = settings.structure(structureId);
+        double power = structure == null ? 1.0 : structure.powerMultiplier();
+        prepare(entity, structureId, scaleTier(settings.normalMob(), power), false, false);
         entity.getPersistentDataContainer().set(summonedByBossKey, PersistentDataType.STRING, bossId.toString());
     }
 
     public void prepareMiniBoss(LivingEntity entity, String structureId) {
         WorldStructuresSettings.BossSpec boss = settings.boss();
+        WorldStructuresSettings.StructureBossSpec structure = settings.structure(structureId);
+        double power = structure == null ? 1.0 : structure.powerMultiplier();
+
         WorldStructuresSettings.MobTierSpec tier = new WorldStructuresSettings.MobTierSpec(
-                boss.healthMultiplier(), boss.damageMultiplier(), boss.speedMultiplier()
+                boss.healthMultiplier() * power,
+                boss.damageMultiplier() * power,
+                boss.speedMultiplier()
         );
         prepare(entity, structureId, tier, true, true);
         entity.setPersistent(true);
@@ -116,6 +128,14 @@ public final class StructureMobService {
     public boolean isSummonedBy(LivingEntity entity, UUID bossId) {
         String owner = entity.getPersistentDataContainer().get(summonedByBossKey, PersistentDataType.STRING);
         return bossId.toString().equals(owner);
+    }
+
+    private WorldStructuresSettings.MobTierSpec scaleTier(WorldStructuresSettings.MobTierSpec base, double power) {
+        return new WorldStructuresSettings.MobTierSpec(
+                base.healthMultiplier() * power,
+                base.damageMultiplier() * power,
+                base.speedMultiplier()
+        );
     }
 
     private void prepare(LivingEntity entity, String structureId, WorldStructuresSettings.MobTierSpec tier,
@@ -180,20 +200,38 @@ public final class StructureMobService {
         EntityEquipment equipment = entity.getEquipment();
         if (equipment == null) return;
 
-        equipment.setHelmet(enchantedArmor(Material.DIAMOND_HELMET, 4));
-        equipment.setChestplate(enchantedArmor(Material.DIAMOND_CHESTPLATE, 4));
-        equipment.setLeggings(enchantedArmor(Material.DIAMOND_LEGGINGS, 4));
-        equipment.setBoots(enchantedArmor(Material.DIAMOND_BOOTS, 4));
-        setArmorDropChances(equipment, settings.gear().dropChance());
+        WorldStructuresSettings.GearSpec gear = settings.gear();
+        RandomGenerator random = ThreadLocalRandom.current();
+        int protectionMin = Math.min(gear.bossProtectionMin(), gear.bossProtectionMax());
+        int protectionMax = Math.max(gear.bossProtectionMin(), gear.bossProtectionMax());
+
+        equipment.setHelmet(bossArmor(Material.DIAMOND_HELMET, Material.NETHERITE_HELMET,
+                gear.bossNetheritePieceChance(), random.nextInt(protectionMin, protectionMax + 1)));
+        equipment.setChestplate(bossArmor(Material.DIAMOND_CHESTPLATE, Material.NETHERITE_CHESTPLATE,
+                gear.bossNetheritePieceChance(), random.nextInt(protectionMin, protectionMax + 1)));
+        equipment.setLeggings(bossArmor(Material.DIAMOND_LEGGINGS, Material.NETHERITE_LEGGINGS,
+                gear.bossNetheritePieceChance(), random.nextInt(protectionMin, protectionMax + 1)));
+        equipment.setBoots(bossArmor(Material.DIAMOND_BOOTS, Material.NETHERITE_BOOTS,
+                gear.bossNetheritePieceChance(), random.nextInt(protectionMin, protectionMax + 1)));
+        setArmorDropChances(equipment, gear.dropChance());
 
         ItemStack weapon = equipment.getItemInMainHand();
         enchantWeapon(weapon, 5);
-        equipment.setItemInMainHandDropChance(settings.gear().dropChance());
+        equipment.setItemInMainHandDropChance(gear.dropChance());
     }
 
     private ItemStack armor(Material iron, Material diamond, double diamondChance, int protectionLevel) {
         Material material = ThreadLocalRandom.current().nextDouble() < diamondChance ? diamond : iron;
         return enchantedArmor(material, protectionLevel);
+    }
+
+    private ItemStack bossArmor(Material diamond, Material netherite, double netheriteChance, int protectionLevel) {
+        Material material = ThreadLocalRandom.current().nextDouble() < netheriteChance ? netherite : diamond;
+        ItemStack item = enchantedArmor(material, protectionLevel);
+        if (ThreadLocalRandom.current().nextDouble() < 0.35) {
+            item.addUnsafeEnchantment(Enchantment.THORNS, 2);
+        }
+        return item;
     }
 
     private ItemStack enchantedArmor(Material material, int protectionLevel) {
