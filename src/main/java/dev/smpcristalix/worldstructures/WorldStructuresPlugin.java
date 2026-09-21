@@ -15,8 +15,10 @@ import org.bukkit.block.Block;
 import org.bukkit.block.Container;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.PluginCommand;
+import org.bukkit.configuration.InvalidConfigurationException;
 import org.bukkit.entity.EntityType;
 import org.bukkit.entity.Player;
+import org.bukkit.Bukkit;
 import org.bukkit.plugin.java.JavaPlugin;
 
 /** Главный класс WorldStructures. */
@@ -34,7 +36,13 @@ public final class WorldStructuresPlugin extends JavaPlugin {
     @Override
     public void onEnable() {
         saveDefaultConfig();
-        settings = WorldStructuresSettings.from(getConfig());
+        try {
+            settings = WorldStructuresSettings.from(getConfig());
+        } catch (IllegalArgumentException exception) {
+            getLogger().severe("Ошибка config.yml: " + exception.getMessage());
+            Bukkit.getPluginManager().disablePlugin(this);
+            return;
+        }
 
         mobService = new StructureMobService(this, settings);
         rewardService = new RewardService(this, settings);
@@ -81,6 +89,10 @@ public final class WorldStructuresPlugin extends JavaPlugin {
     }
 
     private boolean executeCommand(CommandSender sender, String[] args) {
+        if (!sender.hasPermission("worldstructures.admin")) {
+            sender.sendMessage("§cНет прав.");
+            return true;
+        }
         if (args.length == 0 || args[0].equalsIgnoreCase("status")) {
             sender.sendMessage("§6WorldStructures §7— §f" + (settings.enabled() ? "включён" : "выключен"));
             sender.sendMessage("§7Конфигов структур: §f" + settings.structures().size());
@@ -96,15 +108,24 @@ public final class WorldStructuresPlugin extends JavaPlugin {
         }
 
         if (args[0].equalsIgnoreCase("reload")) {
+            String previousConfig = getConfig().saveToString();
             reloadConfig();
-            settings = WorldStructuresSettings.from(getConfig());
-            mobService.reload(settings);
-            rewardService.reload(settings);
-            miniBossService.reload(settings);
-            chestService.reload(settings);
-            instanceService.reload(settings);
-            placementService.reload(settings);
-            generationListener.reload(settings);
+            WorldStructuresSettings loaded;
+            try {
+                loaded = WorldStructuresSettings.from(getConfig());
+            } catch (IllegalArgumentException exception) {
+                restoreConfig(previousConfig);
+                sender.sendMessage("§cКонфиг не применён: " + exception.getMessage());
+                return true;
+            }
+            mobService.reload(loaded);
+            rewardService.reload(loaded);
+            miniBossService.reload(loaded);
+            chestService.reload(loaded);
+            instanceService.reload(loaded);
+            placementService.reload(loaded);
+            generationListener.reload(loaded);
+            settings = loaded;
             sender.sendMessage("§aWorldStructures перезагружен.");
             return true;
         }
@@ -162,8 +183,11 @@ public final class WorldStructuresPlugin extends JavaPlugin {
                 return true;
             }
             instanceService.resetGuards(instance.instanceId());
-            miniBossService.forceRespawn(instance.instanceId());
-            player.sendMessage("§aСтруктура сброшена: охрана и мини-босс восстановлены. Сундуки не перезаполнялись.");
+            boolean bossReset = placementService.resetBoss(instance);
+            player.sendMessage("§aОхрана структуры восстановлена. Сундуки не перезаполнялись.");
+            if (!bossReset) {
+                player.sendMessage("§eБосс не сброшен: сначала загрузи все чанки его leash-зоны, чтобы не создать дубликат.");
+            }
             return true;
         }
 
@@ -183,9 +207,12 @@ public final class WorldStructuresPlugin extends JavaPlugin {
                 return true;
             }
             instanceService.resetGuards(instance.instanceId());
-            miniBossService.forceRespawn(instance.instanceId());
+            boolean bossReset = placementService.resetBoss(instance);
             player.sendMessage("§aСтруктура восстановлена из NBT: §f" + instance.instanceId());
             player.sendMessage("§7Контейнеров восстановлено без обновления лута: §f" + result.containersRestored());
+            if (!bossReset) {
+                player.sendMessage("§eБосс не сброшен: сначала загрузи все чанки его leash-зоны, чтобы не создать дубликат.");
+            }
             return true;
         }
 
@@ -271,6 +298,14 @@ public final class WorldStructuresPlugin extends JavaPlugin {
 
         player.sendMessage("§cИспользование: /ws <status|reload|locate|boss|reset|repair|debug|place|mark|mob|markchest>");
         return true;
+    }
+
+    private void restoreConfig(String serialized) {
+        try {
+            getConfig().loadFromString(serialized);
+        } catch (InvalidConfigurationException impossible) {
+            throw new IllegalStateException("Could not restore previously valid config", impossible);
+        }
     }
 
     private double horizontalDistanceSquared(Location a, Location b) {

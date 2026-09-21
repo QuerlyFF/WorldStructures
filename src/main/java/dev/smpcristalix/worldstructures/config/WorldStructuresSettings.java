@@ -76,15 +76,15 @@ public final class WorldStructuresSettings {
                 positiveInt(config.getInt("miniboss.summon.min-count", 2), 1),
                 positiveInt(config.getInt("miniboss.summon.max-count", 4), 1),
                 positiveInt(config.getInt("miniboss.summon.max-alive-minions", 12), 1),
-                Math.max(1.0, config.getDouble("miniboss.summon.radius", 5.0)),
-                Math.max(1.0, config.getDouble("miniboss.knockback.radius", 9.0)),
-                Math.max(0.1, config.getDouble("miniboss.knockback.horizontal-strength", 1.35)),
-                Math.max(0.0, config.getDouble("miniboss.knockback.vertical-strength", 0.35)),
-                Math.max(1.0, config.getDouble("miniboss.regeneration.radius", 10.0)),
+                atLeast(config.getDouble("miniboss.summon.radius", 5.0), 1.0),
+                atLeast(config.getDouble("miniboss.knockback.radius", 9.0), 1.0),
+                atLeast(config.getDouble("miniboss.knockback.horizontal-strength", 1.35), 0.1),
+                atLeast(config.getDouble("miniboss.knockback.vertical-strength", 0.35), 0.0),
+                atLeast(config.getDouble("miniboss.regeneration.radius", 10.0), 1.0),
                 positiveInt(config.getInt("miniboss.regeneration.duration-min-seconds", 5), 1) * 20,
                 positiveInt(config.getInt("miniboss.regeneration.duration-max-seconds", 6), 1) * 20,
                 Math.max(0, config.getInt("miniboss.regeneration.amplifier", 1)),
-                Math.max(1.0, config.getDouble("miniboss.debuff.radius", 10.0)),
+                atLeast(config.getDouble("miniboss.debuff.radius", 10.0), 1.0),
                 positiveInt(config.getInt("miniboss.debuff.duration-min-seconds", 5), 1) * 20,
                 positiveInt(config.getInt("miniboss.debuff.duration-max-seconds", 8), 1) * 20
         );
@@ -103,6 +103,11 @@ public final class WorldStructuresSettings {
         );
 
         structures = Collections.unmodifiableMap(readStructures(config, eliteChance));
+        if (enabled && structures.isEmpty()) {
+            throw new IllegalArgumentException("structures section must contain at least one structure");
+        }
+        validateGenerationConfig(config, structures.keySet());
+        validateRuntimeConfig(config);
     }
 
     public static WorldStructuresSettings from(FileConfiguration config) {
@@ -134,16 +139,17 @@ public final class WorldStructuresSettings {
             EntityType type;
             try {
                 type = EntityType.valueOf(config.getString(path + ".boss-type", "VINDICATOR").toUpperCase());
-            } catch (IllegalArgumentException ignored) {
-                type = EntityType.VINDICATOR;
+            } catch (IllegalArgumentException exception) {
+                throw new IllegalArgumentException("Unknown boss type at " + path + ".boss-type");
             }
+            if (!type.isAlive()) throw new IllegalArgumentException("Boss type must be living at " + path);
 
             EnumSet<BossAbility> abilities = EnumSet.noneOf(BossAbility.class);
             for (String raw : config.getStringList(path + ".abilities")) {
                 try {
                     abilities.add(BossAbility.valueOf(raw.toUpperCase()));
-                } catch (IllegalArgumentException ignored) {
-                    // Некорректная способность просто пропускается.
+                } catch (IllegalArgumentException exception) {
+                    throw new IllegalArgumentException("Unknown boss ability at " + path + ": " + raw);
                 }
             }
             if (abilities.isEmpty()) abilities.add(BossAbility.KNOCKBACK);
@@ -176,9 +182,10 @@ public final class WorldStructuresSettings {
             EntityType type;
             try {
                 type = EntityType.valueOf(key.toUpperCase());
-            } catch (IllegalArgumentException ignored) {
-                continue;
+            } catch (IllegalArgumentException exception) {
+                throw new IllegalArgumentException("Unknown mob type at " + path + ": " + key);
             }
+            if (!type.isAlive()) throw new IllegalArgumentException("Mob type must be living at " + path + ": " + key);
 
             List<Integer> range = config.getIntegerList(path + "." + key);
             if (range.size() < 2) continue;
@@ -200,11 +207,41 @@ public final class WorldStructuresSettings {
     }
 
     private static double probability(double value) {
+        if (!Double.isFinite(value)) throw new IllegalArgumentException("Probability must be finite: " + value);
         return Math.max(0.0, Math.min(1.0, value));
     }
 
     private static double positive(double value, double fallback) {
+        if (!Double.isFinite(value)) throw new IllegalArgumentException("Multiplier must be finite: " + value);
         return value > 0.0 ? value : fallback;
+    }
+
+    private static double atLeast(double value, double minimum) {
+        if (!Double.isFinite(value)) throw new IllegalArgumentException("Numeric setting must be finite: " + value);
+        return Math.max(minimum, value);
+    }
+
+    private static void validateGenerationConfig(FileConfiguration config, java.util.Set<String> structureIds) {
+        atLeast(config.getDouble("generation.min-distance-from-spawn-blocks", 500.0), 0.0);
+        probability(config.getDouble("generation.spawn-chance-per-region", 0.60));
+        for (String structureId : structureIds) {
+            probability(config.getDouble("structures." + structureId + ".generation.chance", 1.0));
+            String placement = config.getString("structures." + structureId + ".generation.placement", "LAND");
+            if (placement == null || !java.util.Set.of("LAND", "WATER", "COAST")
+                    .contains(placement.toUpperCase(java.util.Locale.ROOT))) {
+                throw new IllegalArgumentException("Unknown generation placement for " + structureId + ": " + placement);
+            }
+        }
+    }
+
+    private static void validateRuntimeConfig(FileConfiguration config) {
+        atLeast(config.getDouble("runtime.guard-respawn-player-exclusion-radius", 64.0), 0.0);
+        atLeast(config.getDouble("runtime.boss-leash-radius", 64.0), 0.0);
+        atLeast(config.getDouble("runtime.bossbar-radius", 48.0), 0.0);
+        double healFraction = config.getDouble("runtime.boss-return-heal-fraction", 0.25);
+        if (!Double.isFinite(healFraction) || healFraction < 0.0 || healFraction > 1.0) {
+            throw new IllegalArgumentException("runtime.boss-return-heal-fraction must be between 0 and 1");
+        }
     }
 
     private static int positiveInt(int value, int fallback) {
@@ -215,7 +252,7 @@ public final class WorldStructuresSettings {
 
     public record DropRule(double chanceMin, double chanceMax, int amountMin, int amountMax) {
         public boolean shouldDrop(RandomGenerator random) {
-            double chance = random.nextDouble(chanceMin, Math.nextUp(chanceMax));
+            double chance = chanceMin == chanceMax ? chanceMin : random.nextDouble(chanceMin, chanceMax);
             return random.nextDouble() < chance;
         }
 

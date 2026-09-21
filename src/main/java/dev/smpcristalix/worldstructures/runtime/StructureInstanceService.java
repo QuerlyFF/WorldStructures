@@ -2,6 +2,7 @@ package dev.smpcristalix.worldstructures.runtime;
 
 import dev.smpcristalix.worldstructures.config.WorldStructuresSettings;
 import dev.smpcristalix.worldstructures.mob.StructureMobService;
+import dev.smpcristalix.worldstructures.persistence.AtomicYamlStore;
 import dev.smpcristalix.worldstructures.structure.StructurePlacementService;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -15,7 +16,6 @@ import org.bukkit.plugin.Plugin;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.HashMap;
@@ -42,6 +42,7 @@ public final class StructureInstanceService {
     private volatile WorldStructuresSettings settings;
     private StructurePlacementService placementService;
     private BukkitTask task;
+    private boolean persistenceWritable = true;
 
     public StructureInstanceService(Plugin plugin,
                                     WorldStructuresSettings settings,
@@ -84,13 +85,21 @@ public final class StructureInstanceService {
     }
 
     public void registerInstance(String instanceId, String structureId, BoundsData bounds) {
-        StructureInstance previous = instances.put(
-                instanceId,
-                new StructureInstance(instanceId, structureId.toLowerCase(), bounds, 0L)
-        );
-        if (previous != null) rebuildSpatialIndex();
-        else indexInstance(instances.get(instanceId));
-        save();
+        if (instanceId == null || instanceId.isBlank() || instances.containsKey(instanceId)) {
+            throw new IllegalArgumentException("Duplicate/invalid structure instance id: " + instanceId);
+        }
+        if (!validBounds(bounds)) throw new IllegalArgumentException("Invalid structure bounds for " + instanceId);
+        if (overlapsExisting(bounds)) {
+            throw new IllegalStateException("Structure bounds overlap an existing instance: " + instanceId);
+        }
+        StructureInstance instance = new StructureInstance(instanceId, structureId.toLowerCase(), bounds, 0L);
+        instances.put(instanceId, instance);
+        indexInstance(instance);
+        if (!save()) {
+            instances.remove(instanceId);
+            rebuildSpatialIndex();
+            throw new IllegalStateException("Could not persist structure instance " + instanceId);
+        }
     }
 
     public int instanceCount() {
@@ -144,7 +153,9 @@ public final class StructureInstanceService {
 
     private void updatePlayerZones() {
         int padding = Math.max(0, plugin.getConfig().getInt("runtime.zone-padding-blocks", 8));
+        Set<UUID> online = new HashSet<>();
         for (Player player : Bukkit.getOnlinePlayers()) {
+            online.add(player.getUniqueId());
             StructureInstance inside = findContaining(player.getLocation(), padding);
             String previous = playerZones.get(player.getUniqueId());
             String current = inside == null ? null : inside.instanceId;
@@ -160,6 +171,7 @@ public final class StructureInstanceService {
             player.sendTitle("§c⚠ " + displayName(inside.structureId), "§7Опасность: §c" + roman(danger), 10, 50, 15);
             player.sendMessage("§8[§6WorldStructures§8] §7Вы вошли в опасную структуру. §fОхрана и мини-босс усилены.");
         }
+        playerZones.keySet().removeIf(uuid -> !online.contains(uuid));
     }
 
     private void updateGuards() {
@@ -279,10 +291,15 @@ public final class StructureInstanceService {
     }
 
     private void load() {
+        if (!storageFile.exists()) return;
+        YamlConfiguration yaml = AtomicYamlStore.load(storageFile, plugin.getLogger());
+        if (yaml == null) {
+            persistenceWritable = false;
+            return;
+        }
+        persistenceWritable = true;
         instances.clear();
         chunkIndex.clear();
-        if (!storageFile.exists()) return;
-        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(storageFile);
         ConfigurationSection root = yaml.getConfigurationSection("instances");
         if (root == null) return;
 
@@ -290,18 +307,64 @@ public final class StructureInstanceService {
             String path = "instances." + id;
             String world = yaml.getString(path + ".world");
             String structure = yaml.getString(path + ".structure-id");
-            if (world == null || structure == null) continue;
+            if (id.isBlank() || world == null || world.isBlank() || structure == null || structure.isBlank()
+                    || !hasAllBounds(yaml, path)) {
+                plugin.getLogger().warning("Пропущен повреждённый structure instance: " + id);
+                continue;
+            }
             BoundsData bounds = new BoundsData(
                     world,
                     yaml.getInt(path + ".min-x"), yaml.getInt(path + ".max-x"),
                     yaml.getInt(path + ".min-y"), yaml.getInt(path + ".max-y"),
                     yaml.getInt(path + ".min-z"), yaml.getInt(path + ".max-z")
             );
-            instances.put(id, new StructureInstance(
-                    id, structure, bounds, yaml.getLong(path + ".guards-cleared-at-ms", 0L)
-            ));
+            if (!validBounds(bounds)) {
+                plugin.getLogger().warning("Пропущены некорректные bounds structure instance: " + id);
+                continue;
+            }
+            instances.put(id, new StructureInstance(id, structure.toLowerCase(), bounds,
+                    Math.max(0L, yaml.getLong(path + ".guards-cleared-at-ms", 0L))));
         }
         rebuildSpatialIndex();
+    }
+
+    private boolean overlapsExisting(BoundsData bounds) {
+        Set<String> candidates = new HashSet<>();
+        for (int chunkX = bounds.minX() >> 4; chunkX <= bounds.maxX() >> 4; chunkX++) {
+            for (int chunkZ = bounds.minZ() >> 4; chunkZ <= bounds.maxZ() >> 4; chunkZ++) {
+                Set<String> ids = chunkIndex.get(new ChunkKey(bounds.worldName(), chunkX, chunkZ));
+                if (ids != null) candidates.addAll(ids);
+            }
+        }
+        for (String id : candidates) {
+            StructureInstance existing = instances.get(id);
+            if (existing != null && intersects(bounds, existing.bounds)) return true;
+        }
+        return false;
+    }
+
+    private boolean intersects(BoundsData a, BoundsData b) {
+        return a.worldName().equals(b.worldName())
+                && a.minX() <= b.maxX() && a.maxX() >= b.minX()
+                && a.minY() <= b.maxY() && a.maxY() >= b.minY()
+                && a.minZ() <= b.maxZ() && a.maxZ() >= b.minZ();
+    }
+
+    private boolean hasAllBounds(YamlConfiguration yaml, String path) {
+        return yaml.contains(path + ".min-x") && yaml.contains(path + ".max-x")
+                && yaml.contains(path + ".min-y") && yaml.contains(path + ".max-y")
+                && yaml.contains(path + ".min-z") && yaml.contains(path + ".max-z");
+    }
+
+    private boolean validBounds(BoundsData bounds) {
+        if (bounds == null || bounds.worldName() == null || bounds.worldName().isBlank()) return false;
+        if (bounds.minX() > bounds.maxX() || bounds.minY() > bounds.maxY() || bounds.minZ() > bounds.maxZ()) {
+            return false;
+        }
+        // Prevent a corrupt YAML record from allocating millions of chunk-index entries on startup.
+        return (long) bounds.maxX() - bounds.minX() <= 1024L
+                && (long) bounds.maxY() - bounds.minY() <= 1024L
+                && (long) bounds.maxZ() - bounds.minZ() <= 1024L;
     }
 
     private void indexInstance(StructureInstance instance) {
@@ -323,7 +386,8 @@ public final class StructureInstanceService {
         for (StructureInstance instance : instances.values()) indexInstance(instance);
     }
 
-    private void save() {
+    private boolean save() {
+        if (!persistenceWritable) return false;
         YamlConfiguration yaml = new YamlConfiguration();
         for (StructureInstance instance : instances.values()) {
             String path = "instances." + instance.instanceId;
@@ -338,14 +402,7 @@ public final class StructureInstanceService {
             yaml.set(path + ".max-z", b.maxZ());
             yaml.set(path + ".guards-cleared-at-ms", instance.guardsClearedAtMillis);
         }
-        try {
-            if (!plugin.getDataFolder().exists() && !plugin.getDataFolder().mkdirs()) {
-                plugin.getLogger().warning("Не удалось создать папку WorldStructures");
-            }
-            yaml.save(storageFile);
-        } catch (IOException exception) {
-            plugin.getLogger().severe("Не удалось сохранить structure-instances.yml: " + exception.getMessage());
-        }
+        return AtomicYamlStore.save(storageFile, yaml, plugin.getLogger());
     }
 
     private String displayName(String id) {

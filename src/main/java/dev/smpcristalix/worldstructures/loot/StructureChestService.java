@@ -126,7 +126,13 @@ public final class StructureChestService implements Listener {
             ItemStack item = snapshot.contents()[i];
             restored[i] = item == null ? null : item.clone();
         }
-        inventory.setContents(restored);
+        if (restored.length == inventory.getSize()) {
+            inventory.setContents(restored);
+        } else {
+            for (int slot = 0; slot < Math.min(restored.length, inventory.getSize()); slot++) {
+                inventory.setItem(slot, restored[slot]);
+            }
+        }
         setGenerated(container, snapshot.rewardGenerated());
     }
 
@@ -134,6 +140,15 @@ public final class StructureChestService implements Listener {
     public void onOpen(InventoryOpenEvent event) {
         List<Container> containers = markedContainers(event.getInventory().getHolder());
         if (containers.isEmpty()) return;
+        if (event.getInventory().getHolder() instanceof DoubleChest && containers.size() != 2) {
+            // A player-owned chest connected across the protection boundary must never be
+            // cleared or filled as if it were part of the NBT structure.
+            event.setCancelled(true);
+            if (event.getPlayer() instanceof Player player) {
+                player.sendActionBar("§cНельзя объединять личный сундук с сундуком структуры.");
+            }
+            return;
+        }
 
         boolean needsGeneration = containers.stream().anyMatch(container -> !isGenerated(container));
         if (!needsGeneration) return;

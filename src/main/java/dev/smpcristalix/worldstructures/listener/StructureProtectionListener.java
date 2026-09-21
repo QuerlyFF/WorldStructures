@@ -4,6 +4,10 @@ import dev.smpcristalix.worldstructures.runtime.StructureInstanceService;
 import org.bukkit.Material;
 import org.bukkit.block.Block;
 import org.bukkit.block.BlockState;
+import org.bukkit.block.BlockFace;
+import org.bukkit.block.data.Directional;
+import org.bukkit.entity.ArmorStand;
+import org.bukkit.entity.Hanging;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.EventPriority;
@@ -11,6 +15,7 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.block.BlockBreakEvent;
 import org.bukkit.event.block.BlockBurnEvent;
+import org.bukkit.event.block.BlockDispenseEvent;
 import org.bukkit.event.block.BlockExplodeEvent;
 import org.bukkit.event.block.BlockFadeEvent;
 import org.bukkit.event.block.BlockFertilizeEvent;
@@ -24,10 +29,16 @@ import org.bukkit.event.block.BlockPlaceEvent;
 import org.bukkit.event.block.BlockSpreadEvent;
 import org.bukkit.event.block.LeavesDecayEvent;
 import org.bukkit.event.entity.EntityChangeBlockEvent;
+import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityExplodeEvent;
+import org.bukkit.event.entity.EntityPlaceEvent;
+import org.bukkit.event.hanging.HangingBreakByEntityEvent;
+import org.bukkit.event.hanging.HangingBreakEvent;
+import org.bukkit.event.hanging.HangingPlaceEvent;
 import org.bukkit.event.player.PlayerBucketEmptyEvent;
 import org.bukkit.event.player.PlayerBucketFillEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.world.StructureGrowEvent;
 import org.bukkit.inventory.ItemStack;
 
@@ -55,10 +66,55 @@ public final class StructureProtectionListener implements Listener {
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onPlace(BlockPlaceEvent event) {
         if (canBypass(event.getPlayer())) return;
-        if (isProtected(event.getBlockPlaced())) {
+        if (isProtected(event.getBlockPlaced()) || wouldMergeWithProtectedChest(event.getBlockPlaced())) {
             event.setCancelled(true);
             deny(event.getPlayer());
         }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onEntityPlace(EntityPlaceEvent event) {
+        if (canBypass(event.getPlayer())) return;
+        if (instances.isInside(event.getEntity().getLocation())) {
+            event.setCancelled(true);
+            if (event.getPlayer() != null) deny(event.getPlayer());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onHangingPlace(HangingPlaceEvent event) {
+        if (canBypass(event.getPlayer())) return;
+        if (instances.isInside(event.getEntity().getLocation())) {
+            event.setCancelled(true);
+            if (event.getPlayer() != null) deny(event.getPlayer());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onHangingBreak(HangingBreakEvent event) {
+        if (!instances.isInside(event.getEntity().getLocation())) return;
+        if (event instanceof HangingBreakByEntityEvent byEntity
+                && byEntity.getRemover() instanceof Player player
+                && canBypass(player)) return;
+        event.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onProtectedEntityInteract(PlayerInteractEntityEvent event) {
+        if (canBypass(event.getPlayer())) return;
+        if ((event.getRightClicked() instanceof Hanging || event.getRightClicked() instanceof ArmorStand)
+                && instances.isInside(event.getRightClicked().getLocation())) {
+            event.setCancelled(true);
+            deny(event.getPlayer());
+        }
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onProtectedEntityDamage(EntityDamageByEntityEvent event) {
+        if (!(event.getEntity() instanceof ArmorStand)
+                || !instances.isInside(event.getEntity().getLocation())) return;
+        if (event.getDamager() instanceof Player player && canBypass(player)) return;
+        event.setCancelled(true);
     }
 
     /**
@@ -97,6 +153,12 @@ public final class StructureProtectionListener implements Listener {
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onEntityChangeBlock(EntityChangeBlockEvent event) {
         if (isProtected(event.getBlock())) event.setCancelled(true);
+    }
+
+    @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
+    public void onDispense(BlockDispenseEvent event) {
+        if (!(event.getBlock().getBlockData() instanceof Directional directional)) return;
+        if (isProtected(event.getBlock().getRelative(directional.getFacing()))) event.setCancelled(true);
     }
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
@@ -178,7 +240,8 @@ public final class StructureProtectionListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onPistonExtend(BlockPistonExtendEvent event) {
-        if (isProtected(event.getBlock())) {
+        if (isProtected(event.getBlock())
+                || isProtected(event.getBlock().getRelative(event.getDirection()))) {
             event.setCancelled(true);
             return;
         }
@@ -194,7 +257,8 @@ public final class StructureProtectionListener implements Listener {
 
     @EventHandler(priority = EventPriority.HIGHEST, ignoreCancelled = true)
     public void onPistonRetract(BlockPistonRetractEvent event) {
-        if (isProtected(event.getBlock())) {
+        if (isProtected(event.getBlock())
+                || isProtected(event.getBlock().getRelative(event.getDirection()))) {
             event.setCancelled(true);
             return;
         }
@@ -223,6 +287,16 @@ public final class StructureProtectionListener implements Listener {
 
     private boolean isProtected(Block block) {
         return block != null && instances.isInside(block.getLocation());
+    }
+
+    private boolean wouldMergeWithProtectedChest(Block placed) {
+        Material type = placed.getType();
+        if (type != Material.CHEST && type != Material.TRAPPED_CHEST) return false;
+        for (BlockFace face : new BlockFace[]{BlockFace.NORTH, BlockFace.SOUTH, BlockFace.EAST, BlockFace.WEST}) {
+            Block neighbor = placed.getRelative(face);
+            if (neighbor.getType() == type && isProtected(neighbor)) return true;
+        }
+        return false;
     }
 
     private boolean canBypass(Player player) {

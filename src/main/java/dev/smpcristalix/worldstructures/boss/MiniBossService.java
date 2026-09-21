@@ -2,6 +2,7 @@ package dev.smpcristalix.worldstructures.boss;
 
 import dev.smpcristalix.worldstructures.config.WorldStructuresSettings;
 import dev.smpcristalix.worldstructures.mob.StructureMobService;
+import dev.smpcristalix.worldstructures.persistence.AtomicYamlStore;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
@@ -24,7 +25,6 @@ import org.bukkit.scheduler.BukkitTask;
 import org.bukkit.util.Vector;
 
 import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Comparator;
@@ -53,6 +53,7 @@ public final class MiniBossService {
     private BukkitTask task;
     private boolean anchorsDirty;
     private long lastAnchorSaveMillis;
+    private boolean persistenceWritable = true;
 
     public MiniBossService(Plugin plugin, WorldStructuresSettings settings, StructureMobService mobService) {
         this.plugin = plugin;
@@ -106,13 +107,20 @@ public final class MiniBossService {
                 location.getBlockZ() >> 4
         );
         anchors.put(instanceId, anchor);
-        saveAnchors();
+        if (!saveAnchors()) {
+            anchors.remove(instanceId);
+            throw new IllegalStateException("Could not persist boss anchor " + instanceId);
+        }
         spawnBoss(anchor, true);
         return instanceId;
     }
 
     public int anchorCount() {
         return anchors.size();
+    }
+
+    public boolean hasAnchor(String anchorId) {
+        return anchorId != null && anchors.containsKey(anchorId);
     }
 
     public int aliveBossCount() {
@@ -138,6 +146,8 @@ public final class MiniBossService {
     public boolean forceRespawn(String anchorId) {
         BossAnchor anchor = anchors.get(anchorId);
         if (anchor == null) return false;
+        if (anchor.currentBossId != null && resolveLivingBoss(anchor) == null
+                && !areBossSearchChunksLoaded(anchor)) return false;
         removeCurrentBoss(anchor, true, true);
         anchor.lastDeathEpochMillis = 0L;
         spawnBoss(anchor, true);
@@ -148,6 +158,8 @@ public final class MiniBossService {
     public boolean forceRemove(String anchorId) {
         BossAnchor anchor = anchors.get(anchorId);
         if (anchor == null) return false;
+        if (anchor.currentBossId != null && resolveLivingBoss(anchor) == null
+                && !areBossSearchChunksLoaded(anchor)) return false;
         removeCurrentBoss(anchor, true, true);
         anchor.lastDeathEpochMillis = System.currentTimeMillis();
         saveAnchors();
@@ -192,8 +204,12 @@ public final class MiniBossService {
                     continue;
                 }
 
-                // Последний известный чанк загружен, но сущности реально нет — это не обычный unload.
+                // UUID lookup не отличает удалённую сущность от босса, который успел перейти
+                // в соседний выгруженный чанк между двумя тиками сервиса. Сбрасывать UUID можно
+                // только когда загружена вся разрешённая leash-зона.
+                if (!areBossSearchChunksLoaded(anchor)) continue;
                 removeRuntime(anchor.currentBossId);
+                removeLoadedMinions(anchor.currentBossId, anchor);
                 anchor.currentBossId = null;
                 anchorsDirty = true;
             }
@@ -310,7 +326,12 @@ public final class MiniBossService {
         anchor.lastBossChunkX = boss.getLocation().getBlockX() >> 4;
         anchor.lastBossChunkZ = boss.getLocation().getBlockZ() >> 4;
         runtimes.put(boss.getUniqueId(), createRuntime(anchor, boss, System.currentTimeMillis()));
-        saveAnchors();
+        if (!saveAnchors()) {
+            removeRuntime(boss.getUniqueId());
+            boss.remove();
+            anchor.currentBossId = null;
+            saveAnchors();
+        }
     }
 
     private BossRuntime createRuntime(BossAnchor anchor, LivingEntity boss, long now) {
@@ -379,12 +400,9 @@ public final class MiniBossService {
     }
 
     private int countAliveMinions(LivingEntity boss) {
-        double leash = Math.max(24.0, plugin.getConfig().getDouble("runtime.boss-leash-radius", 64.0));
-        double radius = Math.max(leash + 16.0, settings.boss().summonRadius() * 4.0);
         int count = 0;
-        for (Entity entity : boss.getNearbyEntities(radius, radius, radius)) {
-            if (entity instanceof LivingEntity living
-                    && living.isValid()
+        for (LivingEntity living : boss.getWorld().getLivingEntities()) {
+            if (living.isValid()
                     && !living.isDead()
                     && mobService.isSummonedBy(living, boss.getUniqueId())) {
                 count++;
@@ -506,6 +524,42 @@ public final class MiniBossService {
         return null;
     }
 
+    private boolean areBossSearchChunksLoaded(BossAnchor anchor) {
+        World world = Bukkit.getWorld(anchor.worldName);
+        if (world == null) return false;
+        int radius = (int) Math.ceil(Math.max(24.0,
+                plugin.getConfig().getDouble("runtime.boss-leash-radius", 64.0))) + 16;
+        int minChunkX = Math.floorDiv((int) Math.floor(anchor.x) - radius, 16);
+        int maxChunkX = Math.floorDiv((int) Math.floor(anchor.x) + radius, 16);
+        int minChunkZ = Math.floorDiv((int) Math.floor(anchor.z) - radius, 16);
+        int maxChunkZ = Math.floorDiv((int) Math.floor(anchor.z) + radius, 16);
+        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                if (!world.isChunkLoaded(chunkX, chunkZ)) return false;
+            }
+        }
+        return true;
+    }
+
+    public boolean isTrackedBoss(UUID bossId) {
+        return bossId != null && findAnchorByBoss(bossId) != null;
+    }
+
+    /** Removes excess loaded minions, including ones returning from formerly unloaded chunks. */
+    public void enforceLoadedMinionLimit(UUID bossId) {
+        BossAnchor anchor = findAnchorByBoss(bossId);
+        if (anchor == null) return;
+        World world = Bukkit.getWorld(anchor.worldName);
+        if (world == null) return;
+
+        int remaining = settings.boss().maxAliveMinions();
+        for (LivingEntity living : world.getLivingEntities()) {
+            if (!mobService.isSummonedBy(living, bossId)) continue;
+            if (remaining-- > 0) continue;
+            living.remove();
+        }
+    }
+
     private void removeCurrentBoss(BossAnchor anchor, boolean cleanupMinions, boolean loadLastChunk) {
         if (anchor.currentBossId == null) return;
         UUID bossId = anchor.currentBossId;
@@ -529,11 +583,10 @@ public final class MiniBossService {
     private void removeLoadedMinions(UUID bossId, BossAnchor anchor) {
         World world = Bukkit.getWorld(anchor.worldName);
         if (world == null) return;
-        double leash = Math.max(24.0, plugin.getConfig().getDouble("runtime.boss-leash-radius", 64.0));
-        double radius = leash + 48.0;
-        Location home = anchor.location(world);
-        for (Entity entity : world.getNearbyEntities(home, radius, radius, radius)) {
-            if (entity instanceof LivingEntity living && mobService.isSummonedBy(living, bossId)) {
+        // Boss removal/death is rare. A full loaded-entity pass prevents lured minions
+        // outside the old radius from surviving and becoming permanent orphans.
+        for (LivingEntity living : world.getLivingEntities()) {
+            if (mobService.isSummonedBy(living, bossId)) {
                 living.remove();
             }
         }
@@ -565,11 +618,17 @@ public final class MiniBossService {
     }
 
     private void loadAnchors() {
-        anchors.clear();
         if (!storageFile.exists()) return;
-        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(storageFile);
+        YamlConfiguration yaml = AtomicYamlStore.load(storageFile, plugin.getLogger());
+        if (yaml == null) {
+            persistenceWritable = false;
+            return;
+        }
+        persistenceWritable = true;
+        anchors.clear();
         ConfigurationSection root = yaml.getConfigurationSection("anchors");
         if (root == null) return;
+        java.util.Set<UUID> claimedBossIds = new java.util.HashSet<>();
 
         for (String id : root.getKeys(false)) {
             String path = "anchors." + id;
@@ -580,12 +639,24 @@ public final class MiniBossService {
                 double x = yaml.getDouble(path + ".x");
                 double y = yaml.getDouble(path + ".y");
                 double z = yaml.getDouble(path + ".z");
+                String structureId = yaml.getString(path + ".structure-id");
+                String worldName = yaml.getString(path + ".world");
+                if (id.isBlank() || structureId == null || structureId.isBlank()
+                        || worldName == null || worldName.isBlank()
+                        || !Double.isFinite(x) || !Double.isFinite(y) || !Double.isFinite(z)) {
+                    plugin.getLogger().warning("Пропущен повреждённый boss anchor " + id);
+                    continue;
+                }
+                if (current != null && !claimedBossIds.add(current)) {
+                    plugin.getLogger().warning("Повторный boss UUID в anchor " + id + "; UUID сброшен.");
+                    current = null;
+                }
                 int defaultChunkX = ((int) Math.floor(x)) >> 4;
                 int defaultChunkZ = ((int) Math.floor(z)) >> 4;
                 anchors.put(id, new BossAnchor(
                         id,
-                        yaml.getString(path + ".structure-id", "unknown"),
-                        yaml.getString(path + ".world", "world"),
+                        structureId,
+                        worldName,
                         x, y, z,
                         type,
                         yaml.getLong(path + ".last-death-epoch-ms", 0L),
@@ -599,7 +670,8 @@ public final class MiniBossService {
         }
     }
 
-    private void saveAnchors() {
+    private boolean saveAnchors() {
+        if (!persistenceWritable) return false;
         YamlConfiguration yaml = new YamlConfiguration();
         for (BossAnchor anchor : anchors.values()) {
             String path = "anchors." + anchor.id;
@@ -614,16 +686,13 @@ public final class MiniBossService {
             yaml.set(path + ".last-boss-chunk-x", anchor.lastBossChunkX);
             yaml.set(path + ".last-boss-chunk-z", anchor.lastBossChunkZ);
         }
-        try {
-            if (!plugin.getDataFolder().exists() && !plugin.getDataFolder().mkdirs()) {
-                plugin.getLogger().warning("Не удалось создать папку WorldStructures");
-            }
-            yaml.save(storageFile);
+        if (AtomicYamlStore.save(storageFile, yaml, plugin.getLogger())) {
             anchorsDirty = false;
             lastAnchorSaveMillis = System.currentTimeMillis();
-        } catch (IOException exception) {
+            return true;
+        } else {
             anchorsDirty = true;
-            plugin.getLogger().severe("Не удалось сохранить boss-anchors.yml: " + exception.getMessage());
+            return false;
         }
     }
 

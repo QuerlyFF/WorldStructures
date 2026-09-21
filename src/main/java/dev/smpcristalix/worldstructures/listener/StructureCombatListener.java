@@ -12,10 +12,13 @@ import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.EntityDeathEvent;
+import org.bukkit.event.world.EntitiesLoadEvent;
 import org.bukkit.projectiles.ProjectileSource;
 
 import java.util.EnumSet;
 import java.util.Set;
+import java.util.HashSet;
+import java.util.UUID;
 
 /**
  * Награды структурных мобов, усиление дальнего урона и анти-абуз мини-боссов.
@@ -90,6 +93,21 @@ public final class StructureCombatListener implements Listener {
 
         double multiplier = mobService.projectileDamageMultiplier(shooter);
         if (multiplier != 1.0) event.setDamage(event.getDamage() * multiplier);
+    }
+
+    @EventHandler(priority = EventPriority.NORMAL)
+    public void onEntitiesLoad(EntitiesLoadEvent event) {
+        Set<UUID> ownersToCheck = new HashSet<>();
+        for (org.bukkit.entity.Entity entity : event.getEntities()) {
+            if (!(entity instanceof LivingEntity living) || !mobService.isSummonedMob(living)) continue;
+            UUID owner = mobService.summonedBossId(living);
+            if (owner == null || !miniBossService.isTrackedBoss(owner)) {
+                living.remove();
+            } else {
+                ownersToCheck.add(owner);
+            }
+        }
+        ownersToCheck.forEach(miniBossService::enforceLoadedMinionLimit);
     }
 
     private LivingEntity resolveShooter(EntityDamageByEntityEvent event) {

@@ -145,6 +145,16 @@ public final class StructureMobService {
         return bossId.toString().equals(owner);
     }
 
+    public UUID summonedBossId(LivingEntity entity) {
+        String owner = entity.getPersistentDataContainer().get(summonedByBossKey, PersistentDataType.STRING);
+        if (owner == null || owner.isBlank()) return null;
+        try {
+            return UUID.fromString(owner);
+        } catch (IllegalArgumentException ignored) {
+            return null;
+        }
+    }
+
     private WorldStructuresSettings.MobTierSpec scaleTier(WorldStructuresSettings.MobTierSpec base, double power) {
         return new WorldStructuresSettings.MobTierSpec(
                 base.healthMultiplier() * power,

@@ -1,6 +1,7 @@
 package dev.smpcristalix.worldstructures.generation;
 
 import dev.smpcristalix.worldstructures.config.WorldStructuresSettings;
+import dev.smpcristalix.worldstructures.persistence.AtomicYamlStore;
 import dev.smpcristalix.worldstructures.structure.StructurePlacementService;
 import org.bukkit.HeightMap;
 import org.bukkit.Location;
@@ -15,7 +16,6 @@ import org.bukkit.event.world.ChunkLoadEvent;
 import org.bukkit.plugin.Plugin;
 
 import java.io.File;
-import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashSet;
@@ -25,6 +25,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.HashMap;
+import java.util.UUID;
 
 /**
  * Детерминированно размещает наши NBT-структуры только в новых чанках.
@@ -36,11 +38,17 @@ public final class NaturalStructureGenerationListener implements Listener {
     private final StructurePlacementService placementService;
     private final File storageFile;
     private final Set<String> generatedRegions = new HashSet<>();
+    private final Set<String> pendingRegions = new HashSet<>();
+    private final Set<String> scheduledRegions = new HashSet<>();
+    private final Map<String, Candidate> pendingCandidates = new HashMap<>();
+    private final Map<ChunkKey, Set<String>> chunkWaiters = new HashMap<>();
 
     private volatile WorldStructuresSettings worldStructuresSettings;
     private volatile GenerationSpec generation;
     private volatile Map<String, StructureGenerationSpec> structures;
     private boolean placing;
+    private boolean persistenceWritable = true;
+    private long generationVersion;
 
     public NaturalStructureGenerationListener(Plugin plugin,
                                                WorldStructuresSettings worldStructuresSettings,
@@ -56,6 +64,11 @@ public final class NaturalStructureGenerationListener implements Listener {
     public void reload(WorldStructuresSettings newSettings) {
         this.worldStructuresSettings = newSettings;
         readConfig();
+        generationVersion++;
+        pendingRegions.clear();
+        scheduledRegions.clear();
+        pendingCandidates.clear();
+        chunkWaiters.clear();
     }
 
     public void stop() {
@@ -68,32 +81,41 @@ public final class NaturalStructureGenerationListener implements Listener {
 
     @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
     public void onChunkLoad(ChunkLoadEvent event) {
-        if (!event.isNewChunk() || placing) return;
+        if (placing) return;
 
         GenerationSpec current = generation;
         if (!worldStructuresSettings.enabled() || !current.enabled()) return;
 
         World world = event.getWorld();
         if (world.getEnvironment() != World.Environment.NORMAL) return;
-        if (!current.worlds().isEmpty() && !current.worlds().contains(world.getName())) return;
+        if (!current.worlds().isEmpty()
+                && !current.worlds().contains(world.getName().toLowerCase(Locale.ROOT))) return;
 
         int chunkX = event.getChunk().getX();
         int chunkZ = event.getChunk().getZ();
+        resumeWaitingCandidates(world, chunkX, chunkZ);
         Candidate candidate = candidateFor(world, chunkX, chunkZ, current);
         if (candidate == null || candidate.chunkX() != chunkX || candidate.chunkZ() != chunkZ) return;
         if (generatedRegions.contains(candidate.regionKey())) return;
+        if (!event.isNewChunk() && !pendingRegions.contains(candidate.regionKey())) return;
 
-        plugin.getServer().getScheduler().runTaskLater(
-                plugin,
-                () -> generate(candidate, world),
-                current.delayTicks()
-        );
+        pendingRegions.add(candidate.regionKey());
+        pendingCandidates.put(candidate.regionKey(), candidate);
+        schedule(candidate, world, current.delayTicks(), generationVersion);
+    }
+
+    private void schedule(Candidate candidate, World world, long delay, long version) {
+        if (!scheduledRegions.add(candidate.regionKey())) return;
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> {
+            scheduledRegions.remove(candidate.regionKey());
+            generate(candidate, world, version);
+        }, Math.max(1L, delay));
     }
 
     private Candidate candidateFor(World world, int chunkX, int chunkZ, GenerationSpec spec) {
         int regionSize = spec.regionSizeChunks();
-        int regionX = Math.floorDiv(chunkX, regionSize);
-        int regionZ = Math.floorDiv(chunkZ, regionSize);
+        int regionX = regionCoordinate(chunkX, regionSize);
+        int regionZ = regionCoordinate(chunkZ, regionSize);
         long seed = mixedSeed(world.getSeed(), regionX, regionZ, spec.salt());
         Random random = new Random(seed);
 
@@ -101,31 +123,39 @@ public final class NaturalStructureGenerationListener implements Listener {
 
         int margin = Math.min(spec.marginChunks(), Math.max(0, (regionSize - 1) / 2));
         int span = Math.max(1, regionSize - margin * 2);
-        int candidateX = regionX * regionSize + margin + random.nextInt(span);
-        int candidateZ = regionZ * regionSize + margin + random.nextInt(span);
+        int candidateX = candidateChunk(regionX, regionSize, margin, random.nextInt(span));
+        int candidateZ = candidateChunk(regionZ, regionSize, margin, random.nextInt(span));
         String regionKey = world.getName() + ":" + regionX + ":" + regionZ;
         return new Candidate(regionKey, regionX, regionZ, candidateX, candidateZ, seed);
     }
 
-    private void generate(Candidate candidate, World world) {
-        if (generatedRegions.contains(candidate.regionKey()) || placing) return;
+    private void generate(Candidate candidate, World world, long version) {
+        if (version != generationVersion || generatedRegions.contains(candidate.regionKey()) || placing) return;
+        GenerationSpec current = generation;
+        if (!worldStructuresSettings.enabled() || !current.enabled()) return;
 
-        // ChunkLoadEvent был новым чанком, значит право на попытку уже получено.
-        // Если игрок успел уйти за delayTicks и чанк выгрузился, не теряем регион навсегда:
-        // кратко подгружаем тот же уже-сгенерированный кандидатный чанк и завершаем попытку.
         if (!world.isChunkLoaded(candidate.chunkX(), candidate.chunkZ())) {
-            world.getChunkAt(candidate.chunkX(), candidate.chunkZ()).load();
+            // Не будим чанк фоновым заданием. Pending-кандидат возобновится при его загрузке.
+            return;
         }
 
-        GenerationSpec current = generation;
         int x = candidate.chunkX() * 16 + 8;
         int z = candidate.chunkZ() * 16 + 8;
+
+        int requiredRadius = requiredLoadedRadius(current);
+        if (!areChunksLoaded(world, x, z, requiredRadius)) {
+            registerChunkWaiters(candidate, world, x, z, requiredRadius);
+            return;
+        }
 
         Location spawn = world.getSpawnLocation();
         double minDistance = current.minDistanceFromSpawnBlocks();
         double dx = x + 0.5 - spawn.getX();
         double dz = z + 0.5 - spawn.getZ();
-        if (dx * dx + dz * dz < minDistance * minDistance) return;
+        if (dx * dx + dz * dz < minDistance * minDistance) {
+            discardPending(candidate.regionKey());
+            return;
+        }
 
         boolean water = isWaterSurface(world, x, z);
         int y = water
@@ -143,30 +173,102 @@ public final class NaturalStructureGenerationListener implements Listener {
                 .filter(entry -> matchesPlacement(
                         world, x, z, water, current, entry.getKey(), entry.getValue()))
                 .toList();
-        if (candidates.isEmpty()) return;
+        if (candidates.isEmpty()) {
+            discardPending(candidate.regionKey());
+            return;
+        }
 
         Random random = new Random(candidate.seed() ^ 0x6A09E667F3BCC909L);
         String structureId = weightedChoice(candidates, random);
-        if (structureId == null) return;
+        if (structureId == null) {
+            discardPending(candidate.regionKey());
+            return;
+        }
 
+        // Durable reservation comes before a multi-step placement. After a crash we prefer
+        // one recoverable partial instance over placing the same dungeon twice.
+        generatedRegions.add(candidate.regionKey());
+        if (!saveGeneratedRegions()) {
+            generatedRegions.remove(candidate.regionKey());
+            return;
+        }
         try {
             placing = true;
             StructurePlacementService.PlacementResult result = placementService.place(
                     structureId,
                     new Location(world, x, y, z)
             );
-            generatedRegions.add(candidate.regionKey());
-            saveGeneratedRegions();
+            discardPending(candidate.regionKey());
             plugin.getLogger().info(
                     "Сгенерирована структура " + result.structureId()
                             + " в " + world.getName()
                             + " [" + x + ", " + y + ", " + z + "]"
             );
         } catch (RuntimeException exception) {
-            plugin.getLogger().warning("Не удалось сгенерировать " + structureId + ": " + exception.getMessage());
+            discardPending(candidate.regionKey());
+            plugin.getLogger().severe("Размещение " + structureId + " завершилось ошибкой после durable reservation; "
+                    + "регион не будет размещён повторно автоматически: " + exception.getMessage());
         } finally {
             placing = false;
         }
+    }
+
+    private int requiredLoadedRadius(GenerationSpec current) {
+        int radius = current.terrainSampleRadius();
+        for (Map.Entry<String, StructureGenerationSpec> entry : structures.entrySet()) {
+            StructureGenerationSpec spec = entry.getValue();
+            if (!spec.enabled() || spec.weight() <= 0) continue;
+            radius = Math.max(radius, placementService.templateHorizontalRadius(entry.getKey()) + 2);
+            if (spec.placement() == PlacementKind.COAST) radius = Math.max(radius, spec.coastSearchRadius());
+        }
+        return radius;
+    }
+
+    private boolean areChunksLoaded(World world, int centerX, int centerZ, int radius) {
+        int minChunkX = Math.floorDiv(centerX - radius, 16);
+        int maxChunkX = Math.floorDiv(centerX + radius, 16);
+        int minChunkZ = Math.floorDiv(centerZ - radius, 16);
+        int maxChunkZ = Math.floorDiv(centerZ + radius, 16);
+        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                if (!world.isChunkLoaded(chunkX, chunkZ)) return false;
+            }
+        }
+        return true;
+    }
+
+    private void registerChunkWaiters(Candidate candidate, World world, int centerX, int centerZ, int radius) {
+        int minChunkX = Math.floorDiv(centerX - radius, 16);
+        int maxChunkX = Math.floorDiv(centerX + radius, 16);
+        int minChunkZ = Math.floorDiv(centerZ - radius, 16);
+        int maxChunkZ = Math.floorDiv(centerZ + radius, 16);
+        UUID worldId = world.getUID();
+        for (int chunkX = minChunkX; chunkX <= maxChunkX; chunkX++) {
+            for (int chunkZ = minChunkZ; chunkZ <= maxChunkZ; chunkZ++) {
+                if (world.isChunkLoaded(chunkX, chunkZ)) continue;
+                chunkWaiters.computeIfAbsent(new ChunkKey(worldId, chunkX, chunkZ), ignored -> new HashSet<>())
+                        .add(candidate.regionKey());
+            }
+        }
+    }
+
+    private void resumeWaitingCandidates(World world, int chunkX, int chunkZ) {
+        Set<String> regions = chunkWaiters.remove(new ChunkKey(world.getUID(), chunkX, chunkZ));
+        if (regions == null) return;
+        for (String regionKey : regions) {
+            Candidate candidate = pendingCandidates.get(regionKey);
+            if (candidate == null || !world.isChunkLoaded(candidate.chunkX(), candidate.chunkZ())) continue;
+            schedule(candidate, world, 1L, generationVersion);
+        }
+    }
+
+    private void discardPending(String regionKey) {
+        pendingRegions.remove(regionKey);
+        pendingCandidates.remove(regionKey);
+        chunkWaiters.values().removeIf(regions -> {
+            regions.remove(regionKey);
+            return regions.isEmpty();
+        });
     }
 
     private boolean passesStructureChance(Candidate candidate,
@@ -281,7 +383,10 @@ public final class NaturalStructureGenerationListener implements Listener {
         int sampleRadius = Math.max(4, config.getInt("generation.terrain-sample-radius", 12));
         int maxHeightDifference = Math.max(0, config.getInt("generation.max-height-difference", 7));
         long salt = config.getLong("generation.salt", 918273645L);
-        Set<String> worlds = new HashSet<>(config.getStringList("generation.worlds"));
+        Set<String> worlds = config.getStringList("generation.worlds").stream()
+                .filter(value -> value != null && !value.isBlank())
+                .map(value -> value.toLowerCase(Locale.ROOT))
+                .collect(java.util.stream.Collectors.toSet());
         generation = new GenerationSpec(
                 enabled, region, margin, chance, minSpawnDistance, delayTicks,
                 sampleRadius, maxHeightDifference, salt, Set.copyOf(worlds)
@@ -336,27 +441,41 @@ public final class NaturalStructureGenerationListener implements Listener {
     }
 
     private double probability(double value) {
+        if (!Double.isFinite(value)) {
+            throw new IllegalArgumentException("Generation probability must be finite");
+        }
         return Math.max(0.0, Math.min(1.0, value));
     }
 
-    private void loadGeneratedRegions() {
-        generatedRegions.clear();
-        if (!storageFile.exists()) return;
-        YamlConfiguration yaml = YamlConfiguration.loadConfiguration(storageFile);
-        generatedRegions.addAll(yaml.getStringList("generated-regions"));
+    static int regionCoordinate(int chunkCoordinate, int regionSize) {
+        return Math.floorDiv(chunkCoordinate, regionSize);
     }
 
-    private void saveGeneratedRegions() {
-        YamlConfiguration yaml = new YamlConfiguration();
-        yaml.set("generated-regions", new ArrayList<>(generatedRegions));
-        try {
-            if (!plugin.getDataFolder().exists() && !plugin.getDataFolder().mkdirs()) {
-                plugin.getLogger().warning("Не удалось создать папку WorldStructures");
-            }
-            yaml.save(storageFile);
-        } catch (IOException exception) {
-            plugin.getLogger().severe("Не удалось сохранить generated-structures.yml: " + exception.getMessage());
+    static int candidateChunk(int regionCoordinate, int regionSize, int margin, int offset) {
+        return regionCoordinate * regionSize + margin + offset;
+    }
+
+    private void loadGeneratedRegions() {
+        if (!storageFile.exists()) return;
+        YamlConfiguration yaml = AtomicYamlStore.load(storageFile, plugin.getLogger());
+        if (yaml == null) {
+            persistenceWritable = false;
+            return;
         }
+        persistenceWritable = true;
+        generatedRegions.clear();
+        yaml.getStringList("generated-regions").stream()
+                .filter(value -> value != null && !value.isBlank())
+                .forEach(generatedRegions::add);
+    }
+
+    private boolean saveGeneratedRegions() {
+        if (!persistenceWritable) return false;
+        YamlConfiguration yaml = new YamlConfiguration();
+        List<String> ordered = new ArrayList<>(generatedRegions);
+        Collections.sort(ordered);
+        yaml.set("generated-regions", ordered);
+        return AtomicYamlStore.save(storageFile, yaml, plugin.getLogger());
     }
 
     private enum PlacementKind {
@@ -389,6 +508,8 @@ public final class NaturalStructureGenerationListener implements Listener {
                              int regionX,
                              int regionZ,
                              int chunkX,
-                             int chunkZ,
-                             long seed) {}
+                              int chunkZ,
+                              long seed) {}
+
+    private record ChunkKey(UUID worldId, int chunkX, int chunkZ) {}
 }
