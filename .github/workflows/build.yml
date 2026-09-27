@@ -1,0 +1,28 @@
+name: Build WorldStructures
+
+on:
+  push:
+    branches: [main, "feature/**"]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+          cache: maven
+      - name: Build
+        run: mvn -B clean verify
+      - name: Upload plugin jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: WorldStructures
+          path: target/WorldStructures.jar
+          if-no-files-found: error
